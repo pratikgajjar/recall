@@ -468,8 +468,29 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 	fmt.Printf("source=%s  project=%s  started=%s  msgs=%d\n\n",
 		s.Source, shortProject(s.Project),
 		time.UnixMilli(s.StartedAt).Format(time.RFC3339), s.MsgCount)
+	// Collapse runs of empty same-role messages so transcripts of tool-call
+	// heavy sessions don't print a wall of `## assistant\n\n## assistant\n\n`.
+	prevRole := ""
+	emptyRun := 0
 	for _, m := range msgs {
-		fmt.Printf("## %s\n%s\n\n", m.Role, m.Text)
+		body := strings.TrimSpace(m.Text)
+		if body == "" {
+			if m.Role == prevRole {
+				emptyRun++
+				continue
+			}
+			emptyRun = 1
+			prevRole = m.Role
+			fmt.Printf("## %s\n_(empty tool-call bubble)_\n\n", m.Role)
+			continue
+		}
+		if emptyRun > 1 {
+			// Note that we collapsed N silent bubbles before this content.
+			fmt.Printf("_(+%d more empty %s bubbles)_\n\n", emptyRun-1, prevRole)
+		}
+		emptyRun = 0
+		prevRole = m.Role
+		fmt.Printf("## %s\n%s\n\n", m.Role, body)
 	}
 	return nil
 }
