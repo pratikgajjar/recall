@@ -1,0 +1,1 @@
+{"ts":"2026-05-26T01:54:18Z","commit":"9ce22c5","status":"keep","notes":"baseline after incremental indexing","primary":"incremental_index_ms","incremental_index_ms":30,"query_ms":44,"index_size_mb":69.40,"binary_size_mb":9.80,"full_index_seconds":"","counts":"✓=codex,cursor=1514,claude=27,codex=1058,total=2599"}
