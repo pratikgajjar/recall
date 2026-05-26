@@ -15,31 +15,39 @@ import (
 const version = "0.1.0"
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `recall %s — your AI chat history, searchable across Cursor, Claude Code, Codex.
+	fmt.Fprintf(os.Stderr, `recall %s — your AI chat history, searchable across Cursor, Claude Code, Codex, pi.
 
 USAGE
-  recall index                       (re)build the index from all sources
-  recall <query>                     search; prints ranked hits
-  recall find <query> [--repo P]     same, with filters
-  recall last [--repo P]             print the most recent session as transcript
-  recall show <session-id>           print one session as transcript (full fidelity)
-  recall sessions [--repo P]         list recent sessions
-  recall open <session-id> [--print] reopen the chat in its source tool
-  recall doctor                      health check
+  recall <query> [flags]           search; prints ranked hits (alias: 'find')
+  recall last [flags]              full transcript of the most recent matching session
+  recall show <session-id>         full transcript of one session (re-read from source)
+  recall sessions [flags]          list sessions, no body
+  recall related <session-id>      sessions covering the same topic as this one
+  recall open <session-id>         reopen in the source tool (cursor://, claude --resume, …)
+  recall stats [flags]             session/message counts by source/project
+  recall index [--full]            (re)build the local index from all sources
+  recall doctor                    health check + source detection
   recall version
 
 FLAGS
-  --repo PATH      restrict to a specific project folder
-  --source NAME    cursor | claude | codex
-  --since DURATION e.g. 24h, 7d
-  --limit N        default 30
-  --json           machine-readable output
+  --repo PATH                      restrict to a specific project folder
+  --source cursor|claude|codex|pi  restrict to one adapter
+  --since DURATION                 e.g. 24h, 7d
+  --limit N                        default 30
+  --json                           machine-readable output (snake_case)
+
+EXAMPLES
+  recall "remote chat"                                # all sources, all repos
+  recall "remote chat" --repo ~/code/acme-api  # one project
+  recall "remote chat" --source pi --since 30d        # one tool, recent
+  recall last --repo .                                # most recent here, full
+  recall related cursor:bc9f2a9b-…                    # neighbour topics
+  recall stats --since 7d                             # what did I work on this week?
 
 DATA
-  index lives at  ~/.recall/index.sqlite      (disposable; rebuild any time)
-  sources read    ~/Library/Application Support/Cursor/User/{global,workspace}Storage/state.vscdb
-                  ~/.claude/projects/*/*.jsonl
-                  ~/.codex/sessions/**/rollout-*.jsonl
+  index    ~/.recall/index.sqlite   (disposable — rebuild any time)
+  sources  Cursor SQLite KV, Claude/Codex/pi JSONL files
+           (read-only — recall never mutates source data)
 `, version)
 }
 
@@ -82,6 +90,14 @@ func main() {
 		}
 	case "open":
 		if err := runOpen(args); err != nil {
+			fatal(err)
+		}
+	case "stats":
+		if err := runStats(args); err != nil {
+			fatal(err)
+		}
+	case "related":
+		if err := runRelated(args); err != nil {
 			fatal(err)
 		}
 	default:
@@ -551,6 +567,99 @@ func runShell(name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func runStats(args []string) error {
+	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	var cf commonFlags
+	cf.register(fs)
+	flagArgs, _ := splitFlagsAndArgs(args, sharedBoolFlags)
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	opts, err := cf.toSearchOpts()
+	if err != nil {
+		return err
+	}
+	ix, err := openIndexOrFail()
+	if err != nil {
+		return err
+	}
+	defer ix.Close()
+	rows, err := ix.Stats(opts)
+	if err != nil {
+		return err
+	}
+	if cf.json {
+		return JSONNewEncoder(os.Stdout).Encode(rows)
+	}
+	// Group printout by source, then project — easier to scan than 1 long table.
+	var totalS, totalM int
+	bySource := map[string][]StatRow{}
+	order := []string{}
+	for _, r := range rows {
+		if _, ok := bySource[r.Source]; !ok {
+			order = append(order, r.Source)
+		}
+		bySource[r.Source] = append(bySource[r.Source], r)
+		totalS += r.Sessions
+		totalM += r.Messages
+	}
+	fmt.Fprintln(os.Stdout, "source  sessions   messages   project")
+	fmt.Fprintln(os.Stdout, "------  --------   --------   -------")
+	for _, src := range order {
+		var ss, ms int
+		for _, r := range bySource[src] {
+			ss += r.Sessions
+			ms += r.Messages
+		}
+		fmt.Fprintf(os.Stdout, "%-6s  %8d   %8d   (all)\n", src, ss, ms)
+		for _, r := range bySource[src] {
+			proj := r.Project
+			if proj == "" {
+				proj = "(none)"
+			}
+			fmt.Fprintf(os.Stdout, "        %8d   %8d     %s\n", r.Sessions, r.Messages, shortProject(proj))
+		}
+	}
+	fmt.Fprintf(os.Stdout, "\n%-6s  %8d   %8d\n", "total", totalS, totalM)
+	return nil
+}
+
+func runRelated(args []string) error {
+	fs := flag.NewFlagSet("related", flag.ExitOnError)
+	var cf commonFlags
+	cf.register(fs)
+	flagArgs, posArgs := splitFlagsAndArgs(args, sharedBoolFlags)
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(posArgs) == 0 {
+		return errors.New("usage: recall related <session-id>")
+	}
+	id := posArgs[0]
+	limit := 10
+	if cf.limit > 0 {
+		limit = cf.limit
+	}
+	ix, err := openIndexOrFail()
+	if err != nil {
+		return err
+	}
+	defer ix.Close()
+	hits, err := ix.Related(id, limit)
+	if err != nil {
+		return err
+	}
+	if cf.json {
+		return JSONNewEncoder(os.Stdout).Encode(hits)
+	}
+	if len(hits) == 0 {
+		fmt.Fprintln(os.Stdout, "no related sessions found")
+		return nil
+	}
+	printHits(os.Stdout, hits)
+	return nil
 }
 
 func runSessions(args []string) error {

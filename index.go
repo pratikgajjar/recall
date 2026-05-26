@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -254,8 +255,10 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return ix.recent(opts)
 	}
-	// Escape query for FTS5: wrap in double quotes to avoid syntax errors on user input.
-	ftsQuery := ftsEscape(query)
+	// Escape query for FTS5: wrap in double quotes to avoid syntax errors.
+	// opts.AnyTerm switches AND → OR (used by Related where ANDing 6+ terms
+	// over-constrains the match).
+	ftsQuery := ftsEscape(query, opts.AnyTerm)
 
 	args := []any{ftsQuery}
 	where := []string{"messages_fts MATCH ?"}
@@ -381,11 +384,13 @@ type SearchOpts struct {
 	Project string
 	Since   int64
 	Limit   int
+	AnyTerm bool // OR terms instead of AND (used by Related)
 }
 
 // ftsEscape turns an arbitrary user string into a safe FTS5 MATCH expression.
-// We split on whitespace, drop FTS punctuation, quote each token, and AND them.
-func ftsEscape(q string) string {
+// We split on whitespace, strip FTS punctuation, quote each token, and join
+// with AND (or OR when anyTerm is set).
+func ftsEscape(q string, anyTerm bool) string {
 	fields := strings.Fields(q)
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -404,8 +409,162 @@ func ftsEscape(q string) string {
 	if len(out) == 0 {
 		return `""`
 	}
+	sep := " AND "
+	if anyTerm {
+		sep = " OR "
+	}
+	return strings.Join(out, sep)
+}
+
+// StatRow is one bucket of `recall stats` output.
+type StatRow struct {
+	Source   string `json:"source"`
+	Project  string `json:"project,omitempty"`
+	Sessions int    `json:"sessions"`
+	Messages int    `json:"messages"`
+}
+
+// Stats aggregates session/message counts by source × project, optionally
+// scoped by the same filters as Search (project, source, since).
+func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
+	where := []string{"1=1"}
+	var args []any
+	if opts.Source != "" {
+		where = append(where, "source = ?")
+		args = append(args, opts.Source)
+	}
+	if opts.Project != "" {
+		where = append(where, "project = ?")
+		args = append(args, opts.Project)
+	}
+	if opts.Since > 0 {
+		where = append(where, "started_at >= ?")
+		args = append(args, opts.Since)
+	}
+	q := `SELECT source, COALESCE(project,''), COUNT(*), COALESCE(SUM(msg_count),0)
+	        FROM sessions WHERE ` + strings.Join(where, " AND ") + `
+	    GROUP BY source, project ORDER BY 4 DESC, 3 DESC`
+	rows, err := ix.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StatRow
+	for rows.Next() {
+		var r StatRow
+		if err := rows.Scan(&r.Source, &r.Project, &r.Sessions, &r.Messages); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Related finds other sessions covering similar topics to `id` by sampling
+// distinctive terms from its title + early user messages and running them
+// back through FTS5. Lightweight pseudo-relevance feedback — no embeddings.
+func (ix *Index) Related(id string, limit int) ([]Hit, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	// Pull title + first ~5 user/assistant messages to mine a query from.
+	rows, err := ix.db.Query(`
+		SELECT COALESCE(s.title,''),
+		       f.text
+		  FROM sessions s LEFT JOIN messages_fts f ON f.session_pk = s.id
+		 WHERE s.id = ?
+		 ORDER BY f.idx ASC LIMIT 6`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var title string
+	var snippets []string
+	for rows.Next() {
+		var t, txt string
+		if err := rows.Scan(&t, &txt); err != nil {
+			return nil, err
+		}
+		if title == "" {
+			title = t
+		}
+		if txt != "" {
+			snippets = append(snippets, txt)
+		}
+	}
+	if title == "" && len(snippets) == 0 {
+		return nil, fmt.Errorf("session %s not found or empty", id)
+	}
+	query := topTerms(title+" "+strings.Join(snippets, " "), 6)
+	hits, err := ix.Search(query, SearchOpts{Limit: limit + 1, AnyTerm: true})
+	if err != nil {
+		return nil, err
+	}
+	// Drop the seed session itself from results.
+	out := make([]Hit, 0, len(hits))
+	for _, h := range hits {
+		if h.SessionID == id {
+			continue
+		}
+		out = append(out, h)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// topTerms picks the highest-information tokens from text — words ≥ 4
+// letters that aren't common chat boilerplate. Good enough for related-
+// session probing without pulling in a real IDF table.
+func topTerms(text string, n int) string {
+	freq := map[string]int{}
+	for _, raw := range strings.FieldsFunc(text, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) {
+		w := strings.ToLower(raw)
+		if len(w) < 4 || isStopWord(w) {
+			continue
+		}
+		freq[w]++
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	pairs := make([]kv, 0, len(freq))
+	for k, v := range freq {
+		pairs = append(pairs, kv{k, v})
+	}
+	// Sort: higher freq first, alphabetical tiebreak.
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].v != pairs[j].v {
+			return pairs[i].v > pairs[j].v
+		}
+		return pairs[i].k < pairs[j].k
+	})
+	out := make([]string, 0, n)
+	for _, p := range pairs {
+		out = append(out, p.k)
+		if len(out) >= n {
+			break
+		}
+	}
 	return strings.Join(out, " ")
 }
+
+var stopWords = map[string]bool{
+	"this": true, "that": true, "with": true, "from": true, "have": true,
+	"will": true, "would": true, "should": true, "could": true, "been": true,
+	"were": true, "what": true, "when": true, "where": true, "which": true,
+	"there": true, "their": true, "them": true, "they": true, "your": true,
+	"into": true, "than": true, "then": true, "more": true, "some": true,
+	"like": true, "just": true, "only": true, "also": true, "user": true,
+	"used": true, "using": true, "code": true, "make": true, "want": true,
+	"need": true, "tool": true,
+}
+
+func isStopWord(w string) bool { return stopWords[w] }
 
 func (ix *Index) Close() error { return ix.db.Close() }
 
