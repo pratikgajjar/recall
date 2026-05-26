@@ -75,7 +75,7 @@ fi
 # Counts after run (validates the index didn't silently drop sessions).
 counts=$(./recall doctor 2>/dev/null | awk '/sessions$/ {print $1"="$2}' | tr '\n' ',' | sed 's/,$//')
 
-jq -nc \
+row=$(jq -nc \
   --arg ts "$(date -u +%FT%TZ)" \
   --arg commit "$commit" \
   --arg notes "$NOTES" \
@@ -93,4 +93,9 @@ jq -nc \
     index_size_mb:$index_size_mb,
     binary_size_mb:$binary_size_mb,
     full_index_seconds:$full_index_seconds,
-    counts:$counts}'
+    counts:$counts}')
+
+# Always append to the canonical log so individual `./bench.sh` calls
+# don't need `| tee -a`. Echo too so the human sees the row.
+echo "$row" >> autoresearch.jsonl
+echo "$row"
