@@ -235,16 +235,16 @@ func (ix *Index) Counts() (map[string]int, error) {
 
 // Hit is one matched message with its parent session info.
 type Hit struct {
-	SessionID string
-	Source    string
-	SourceID  string
-	Project   string
-	Title     string
-	StartedAt int64
-	MsgIdx    int
-	Role      string
-	Snippet   string // FTS-highlighted excerpt
-	Rank      float64
+	SessionID string  `json:"session_id"`
+	Source    string  `json:"source"`
+	SourceID  string  `json:"source_id"`
+	Project   string  `json:"project"`
+	Title     string  `json:"title"`
+	StartedAt int64   `json:"started_at_ms"`
+	MsgIdx    int     `json:"msg_idx"`
+	Role      string  `json:"role"`
+	Snippet   string  `json:"snippet"` // FTS-highlighted excerpt
+	Rank      float64 `json:"rank"`
 }
 
 func (h Hit) StartedTime() time.Time { return time.UnixMilli(h.StartedAt) }

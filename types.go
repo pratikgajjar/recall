@@ -2,23 +2,23 @@ package main
 
 // Session is one chat thread (composer / claude session / codex rollout).
 type Session struct {
-	Source    string // "cursor" | "claude" | "codex"
-	SourceID  string // native id from the source tool
-	Project   string // absolute folder path
-	Title     string // chat name or first-prompt slug
-	StartedAt int64  // unix ms
-	EndedAt   int64  // unix ms
-	MsgCount  int
-	Meta      map[string]any // extra source-specific bits
+	Source    string         `json:"source"`        // "cursor" | "claude" | "codex" | "pi"
+	SourceID  string         `json:"source_id"`     // native id from the source tool
+	Project   string         `json:"project"`       // absolute folder path
+	Title     string         `json:"title"`         // chat name or first-prompt slug
+	StartedAt int64          `json:"started_at_ms"` // unix ms
+	EndedAt   int64          `json:"ended_at_ms"`   // unix ms
+	MsgCount  int            `json:"msg_count"`
+	Meta      map[string]any `json:"meta,omitempty"` // extra source-specific bits
 }
 
 // Message is one turn inside a session.
 type Message struct {
-	SourceID string // session.SourceID
-	Idx      int
-	Role     string // "user" | "assistant" | "tool" | "system"
-	TS       int64  // unix ms
-	Text     string // trimmed to ~excerptMax
+	SourceID string `json:"source_id"` // session.SourceID
+	Idx      int    `json:"idx"`
+	Role     string `json:"role"`  // "user" | "assistant" | "tool" | "system"
+	TS       int64  `json:"ts_ms"` // unix ms
+	Text     string `json:"text"`  // trimmed to ~excerptMax
 }
 
 // Adapter reads from a single tool's storage.
