@@ -115,23 +115,61 @@ func (a *CursorAdapter) OpenURL(sourceID string) string {
 //  2. globalStorage/state.vscdb for composerData:* and bubbleId:* blobs.
 //
 // Workspace folders are recovered from each workspace.json (folder URI).
-func (a *CursorAdapter) Scan() ([]Session, []Message, error) {
+//
+// Checkpoint shape: {"rowid": N}. If prev is set, only composers whose
+// composerData or bubble rows have rowid > N are re-ingested.
+func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) {
+	prevRowID := parseCursorCkpt(prev)
 	cidToProject, err := a.mapComposersToProjects()
 	if err != nil {
-		return nil, nil, fmt.Errorf("workspace scan: %w", err)
+		return nil, nil, "", fmt.Errorf("workspace scan: %w", err)
 	}
 
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
 	db, err := sql.Open("sqlite", gpath+"?mode=ro&_pragma=query_only(true)&immutable=1")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	defer db.Close()
 
-	// Load all composerData rows first (small — 2-3k typically, ~150MB blob total).
-	rows, err := db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
+	// Determine the set of composerIds to (re)ingest.
+	// For a full scan (prevRowID == 0), this is everything in composerData.
+	// For incremental, it's any composerId whose composerData OR bubble rows
+	// have rowid > prevRowID.
+	touched := map[string]bool{}
+	if prevRowID > 0 {
+		ids, maxR, err := a.collectTouchedComposers(db, prevRowID)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		for _, id := range ids {
+			touched[id] = true
+		}
+		// Capture the new max rowid early so we can emit it even on empty diff.
+		_ = maxR
+	}
+
+	// Load composerData rows. On incremental, restrict to touched composers.
+	var rows *sql.Rows
+	if prevRowID > 0 && len(touched) > 0 {
+		// IN-list with quoted ids
+		ids := make([]string, 0, len(touched))
+		args := make([]any, 0, len(touched))
+		for id := range touched {
+			ids = append(ids, "?")
+			args = append(args, "composerData:"+id)
+		}
+		q := `SELECT key, value FROM cursorDiskKV WHERE key IN (` + strings.Join(ids, ",") + `)`
+		rows, err = db.Query(q, args...)
+	} else if prevRowID == 0 {
+		rows, err = db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
+	} else {
+		// incremental but nothing changed
+		next, _ := a.currentMaxRowID(db)
+		return nil, nil, encodeCursorCkpt(next), nil
+	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	type composerHeader struct {
@@ -159,7 +197,7 @@ func (a *CursorAdapter) Scan() ([]Session, []Message, error) {
 		var val []byte
 		if err := rows.Scan(&key, &val); err != nil {
 			rows.Close()
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		var cb composerBlob
 		if err := json.Unmarshal(val, &cb); err != nil {
@@ -173,44 +211,31 @@ func (a *CursorAdapter) Scan() ([]Session, []Message, error) {
 	}
 	rows.Close()
 
-	// Now pull every bubble. They are keyed bubbleId:<composerId>:<msgId>.
-	// We do one big query and bucket in memory.
-	type bubbleRow struct {
-		composerID string
-		msgID      string
-		text       string
-		ttype      int
-	}
+	// Now pull bubbles. On incremental scan, restrict to the touched composer set;
+	// otherwise pull every bubble in one sweep.
 	bubblesByComp := map[string][]bubbleRow{}
 
-	br, err := db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'`)
-	if err != nil {
-		return nil, nil, err
+	var br *sql.Rows
+	if prevRowID > 0 && len(touched) > 0 {
+		// One range query per composer (uses the key index efficiently).
+		// In practice "touched" is tiny (1-10), so this is much cheaper than a
+		// full scan of 245k bubbles.
+		for cid := range touched {
+			rs, err := db.Query(`SELECT key, value FROM cursorDiskKV
+				WHERE key >= ? AND key < ?`,
+				"bubbleId:"+cid+":", "bubbleId:"+cid+";")
+			if err != nil {
+				return nil, nil, "", err
+			}
+			collectBubbles(rs, bubblesByComp)
+		}
+	} else {
+		br, err = db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'`)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		collectBubbles(br, bubblesByComp)
 	}
-	for br.Next() {
-		var key string
-		var val []byte
-		if err := br.Scan(&key, &val); err != nil {
-			br.Close()
-			return nil, nil, err
-		}
-		// key = bubbleId:<cid>:<mid>
-		s := key[len("bubbleId:"):]
-		i := strings.Index(s, ":")
-		if i <= 0 {
-			continue
-		}
-		cid := s[:i]
-		mid := s[i+1:]
-		text, ttype := extractBubbleText(val)
-		if text == "" {
-			continue
-		}
-		bubblesByComp[cid] = append(bubblesByComp[cid], bubbleRow{
-			composerID: cid, msgID: mid, text: text, ttype: ttype,
-		})
-	}
-	br.Close()
 
 	// Compose sessions in the order specified by composerData.fullConversationHeadersOnly.
 	// Fall back to discovered bubble order otherwise.
@@ -270,7 +295,83 @@ func (a *CursorAdapter) Scan() ([]Session, []Message, error) {
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].StartedAt < sessions[j].StartedAt
 	})
-	return sessions, msgs, nil
+	nextRowID, _ := a.currentMaxRowID(db)
+	return sessions, msgs, encodeCursorCkpt(nextRowID), nil
+}
+
+type bubbleRow struct {
+	composerID string
+	msgID      string
+	text       string
+	ttype      int
+}
+
+// collectBubbles drains a row iterator and buckets bubbles by composerId.
+func collectBubbles(rs *sql.Rows, into map[string][]bubbleRow) {
+	defer rs.Close()
+	for rs.Next() {
+		var key string
+		var val []byte
+		if err := rs.Scan(&key, &val); err != nil {
+			return
+		}
+		s := key[len("bubbleId:"):]
+		i := strings.Index(s, ":")
+		if i <= 0 {
+			continue
+		}
+		cid := s[:i]
+		mid := s[i+1:]
+		text, ttype := extractBubbleText(val)
+		if text == "" {
+			continue
+		}
+		into[cid] = append(into[cid], bubbleRow{cid, mid, text, ttype})
+	}
+}
+
+// collectTouchedComposers returns composerIds whose composerData or bubble rows
+// have rowid > prevRowID, plus the current max rowid.
+func (a *CursorAdapter) collectTouchedComposers(db *sql.DB, prevRowID int64) ([]string, int64, error) {
+	seen := map[string]bool{}
+	rows, err := db.Query(`SELECT key FROM cursorDiskKV
+		WHERE rowid > ? AND (key LIKE 'composerData:%' OR key LIKE 'bubbleId:%')`, prevRowID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, 0, err
+		}
+		switch {
+		case strings.HasPrefix(key, "composerData:"):
+			seen[strings.TrimPrefix(key, "composerData:")] = true
+		case strings.HasPrefix(key, "bubbleId:"):
+			s := key[len("bubbleId:"):]
+			if i := strings.Index(s, ":"); i > 0 {
+				seen[s[:i]] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	maxR, err := a.currentMaxRowID(db)
+	return out, maxR, err
+}
+
+func (a *CursorAdapter) currentMaxRowID(db *sql.DB) (int64, error) {
+	var n sql.NullInt64
+	if err := db.QueryRow(`SELECT MAX(rowid) FROM cursorDiskKV`).Scan(&n); err != nil {
+		return 0, err
+	}
+	if !n.Valid {
+		return 0, nil
+	}
+	return n.Int64, nil
 }
 
 func bubbleRole(t int) string {

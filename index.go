@@ -178,6 +178,14 @@ func (ix *Index) SetMeta(k, v string) error {
 	return err
 }
 
+func (ix *Index) GetMeta(k string) string {
+	var v string
+	if err := ix.db.QueryRow(`SELECT v FROM meta WHERE k = ?`, k).Scan(&v); err != nil {
+		return ""
+	}
+	return v
+}
+
 func (ix *Index) Counts() (map[string]int, error) {
 	rows, err := ix.db.Query(`SELECT source, COUNT(*) FROM sessions GROUP BY source`)
 	if err != nil {

@@ -197,7 +197,13 @@ func openIndexOrFail() (*Index, error) {
 
 // ---------- commands ----------
 
-func runIndex(_ []string) error {
+func runIndex(args []string) error {
+	fs := flag.NewFlagSet("index", flag.ExitOnError)
+	full := fs.Bool("full", false, "ignore checkpoints and reindex everything")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
 	ix, err := openIndex(defaultIndexPath())
 	if err != nil {
 		return err
@@ -212,7 +218,11 @@ func runIndex(_ []string) error {
 			continue
 		}
 		t0 := time.Now()
-		sessions, msgs, err := ad.Scan()
+		var prev string
+		if !*full {
+			prev = ix.GetMeta("ckpt:" + ad.ID())
+		}
+		sessions, msgs, next, err := ad.Scan(prev)
 		if err != nil {
 			fmt.Printf("  %-7s error: %v\n", ad.ID(), err)
 			continue
@@ -220,6 +230,9 @@ func runIndex(_ []string) error {
 		if err := ix.IngestBatch(ad.ID(), sessions, msgs); err != nil {
 			fmt.Printf("  %-7s ingest error: %v\n", ad.ID(), err)
 			continue
+		}
+		if next != "" {
+			_ = ix.SetMeta("ckpt:"+ad.ID(), next)
 		}
 		grand += len(sessions)
 		fmt.Printf("  %-7s %6d sessions  %7d messages  %s\n",

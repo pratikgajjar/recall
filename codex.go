@@ -18,12 +18,15 @@ type CodexAdapter struct {
 func (a *CodexAdapter) ID() string      { return "codex" }
 func (a *CodexAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
-func (a *CodexAdapter) Scan() ([]Session, []Message, error) {
+func (a *CodexAdapter) Scan(prev string) ([]Session, []Message, string, error) {
+	prevMap := parseFileCkpt(prev)
+	nextMap := map[string]string{}
+
 	var sessions []Session
 	var msgs []Message
 	err := filepath.WalkDir(a.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip unreadable
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -31,6 +34,15 @@ func (a *CodexAdapter) Scan() ([]Session, []Message, error) {
 		name := d.Name()
 		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
 			return nil
+		}
+		st, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		tok := fileTok(st)
+		nextMap[path] = tok
+		if prevMap[path] == tok {
+			return nil // unchanged — skip
 		}
 		s, mm, e := a.readSession(path, true)
 		if e != nil || s == nil {
@@ -40,7 +52,7 @@ func (a *CodexAdapter) Scan() ([]Session, []Message, error) {
 		msgs = append(msgs, mm...)
 		return nil
 	})
-	return sessions, msgs, err
+	return sessions, msgs, encodeFileCkpt(nextMap), err
 }
 
 // Fetch walks the sessions tree to find the rollout file for this id, then returns

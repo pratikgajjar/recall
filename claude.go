@@ -18,10 +18,13 @@ type ClaudeAdapter struct {
 func (a *ClaudeAdapter) ID() string      { return "claude" }
 func (a *ClaudeAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
-func (a *ClaudeAdapter) Scan() ([]Session, []Message, error) {
+func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) {
+	prevMap := parseFileCkpt(prev)
+	nextMap := map[string]string{}
+
 	entries, err := os.ReadDir(a.Root)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	var sessions []Session
 	var msgs []Message
@@ -37,10 +40,20 @@ func (a *ClaudeAdapter) Scan() ([]Session, []Message, error) {
 			if !strings.HasSuffix(name, ".jsonl") {
 				continue
 			}
-			sessID := strings.TrimSuffix(name, ".jsonl")
-			s, mm, err := a.readSession(filepath.Join(dir, name), sessID, project)
+			full := filepath.Join(dir, name)
+			st, err := os.Stat(full)
 			if err != nil {
-				continue // skip malformed
+				continue
+			}
+			tok := fileTok(st)
+			nextMap[full] = tok
+			if prevMap[full] == tok {
+				continue // unchanged — skip
+			}
+			sessID := strings.TrimSuffix(name, ".jsonl")
+			s, mm, err := a.readSession(full, sessID, project)
+			if err != nil {
+				continue
 			}
 			if s != nil {
 				sessions = append(sessions, *s)
@@ -48,7 +61,7 @@ func (a *ClaudeAdapter) Scan() ([]Session, []Message, error) {
 			}
 		}
 	}
-	return sessions, msgs, nil
+	return sessions, msgs, encodeFileCkpt(nextMap), nil
 }
 
 // Fetch re-reads the JSONL for one session and returns untruncated messages.

@@ -25,9 +25,11 @@ type Message struct {
 type Adapter interface {
 	ID() string
 	Available() bool
-	// Scan returns all sessions+messages currently stored.
-	// V0 is idempotent (full scan, upsert). V1 will checkpoint.
-	Scan() ([]Session, []Message, error)
+	// Scan returns sessions+messages plus a new opaque checkpoint string.
+	// If prev is non-empty, the adapter should attempt an incremental scan
+	// (returning only changed sessions) and produce a fresh checkpoint.
+	// If prev is empty or unparseable, a full scan is performed.
+	Scan(prev string) (sessions []Session, msgs []Message, next string, err error)
 	// Fetch returns the full transcript for one session, untruncated.
 	// Used by `recall show` / `recall last` so piped output is faithful.
 	Fetch(sourceID string) ([]Message, error)
