@@ -176,17 +176,27 @@ func trimText(s string) string {
 // recall index is disposable: a crash mid-`recall index` just means rerun.
 // Callers should defer ix.BulkMode(false).
 //
-// synchronous=OFF       — skip fsync at commit (~2× faster on macOS APFS)
-// journal_mode=MEMORY   — keep the rollback journal off disk for this run
-//                          (WAL stays the steady state when bulk is off)
-// cache_size=-262144    — 256 MB page cache, plenty for our index
+//	synchronous=OFF      — skip fsync at commit (~2× faster on APFS)
+//	journal_mode=MEMORY  — keep rollback journal off disk for this run
+//	cache_size=-262144   — 256 MB page cache
+//	FTS5 automerge=0     — defer index merging until 'optimize' below
+//
+// When BulkMode(false) is called we restore the steady state (WAL + NORMAL +
+// 64 MB cache) and run an FTS5 'optimize' once so search performance matches
+// what we'd get from incremental writes.
 func (ix *Index) BulkMode(on bool) {
 	if on {
 		_, _ = ix.db.Exec(`PRAGMA synchronous=OFF`)
 		_, _ = ix.db.Exec(`PRAGMA journal_mode=MEMORY`)
 		_, _ = ix.db.Exec(`PRAGMA cache_size=-262144`)
+		// Defer FTS5 segment merges; the integrity-check happens at optimize.
+		_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts, rank) VALUES('automerge', 0)`)
+		_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts, rank) VALUES('automerge', 0)`)
 		return
 	}
+	// Flush any pending merges so query latency is stable.
+	_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
+	_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts) VALUES('optimize')`)
 	_, _ = ix.db.Exec(`PRAGMA synchronous=NORMAL`)
 	_, _ = ix.db.Exec(`PRAGMA journal_mode=WAL`)
 	_, _ = ix.db.Exec(`PRAGMA cache_size=-65536`)
