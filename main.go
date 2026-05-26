@@ -112,6 +112,7 @@ func defaultAdapters() []Adapter {
 		&CursorAdapter{UserDir: filepath.Join(home, "Library", "Application Support", "Cursor", "User")},
 		&ClaudeAdapter{Root: filepath.Join(home, ".claude", "projects")},
 		&CodexAdapter{Root: filepath.Join(home, ".codex", "sessions")},
+		&PiAdapter{Root: filepath.Join(home, ".pi", "agent", "sessions")},
 	}
 }
 
@@ -274,12 +275,25 @@ func runDoctor(_ []string) error {
 	}
 	fmt.Printf("index: %s (%s)\n", idxPath, humanSize(st.Size()))
 	total := 0
-	for _, c := range counts {
-		total += c
+	// Iterate adapters in their default order so output stays stable across runs.
+	for _, ad := range defaultAdapters() {
+		if c, ok := counts[ad.ID()]; ok {
+			fmt.Printf("  %-7s %d sessions\n", ad.ID(), c)
+			total += c
+		}
 	}
-	for _, src := range []string{"cursor", "claude", "codex"} {
-		if c, ok := counts[src]; ok {
-			fmt.Printf("  %-7s %d sessions\n", src, c)
+	// Any source rows from older runs we no longer have an adapter for.
+	for src, c := range counts {
+		known := false
+		for _, ad := range defaultAdapters() {
+			if ad.ID() == src {
+				known = true
+				break
+			}
+		}
+		if !known {
+			fmt.Printf("  %-7s %d sessions (orphan)\n", src, c)
+			total += c
 		}
 	}
 	fmt.Printf("  total   %d sessions\n", total)
@@ -293,6 +307,8 @@ func adapterPath(a Adapter) string {
 	case *ClaudeAdapter:
 		return v.Root
 	case *CodexAdapter:
+		return v.Root
+	case *PiAdapter:
 		return v.Root
 	}
 	return ""
