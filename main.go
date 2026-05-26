@@ -80,9 +80,9 @@ func main() {
 			fatal(err)
 		}
 	default:
-		// Implicit search: `recall <query…>`
-		query := strings.Join(os.Args[1:], " ")
-		if err := runFind([]string{query}); err != nil {
+		// Implicit search: `recall <query…> [flags…]`. Pass argv through;
+		// runFind separates flags from positionals.
+		if err := runFind(os.Args[1:]); err != nil {
 			fatal(err)
 		}
 	}

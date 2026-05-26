@@ -58,6 +58,12 @@ func bootstrap(db *sql.DB) error {
 			text,
 			tokenize = 'porter unicode61 remove_diacritics 1'
 		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+			session_pk UNINDEXED,
+			title,
+			project,
+			tokenize = 'porter unicode61 remove_diacritics 1'
+		)`,
 		`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`,
 	}
 	for _, s := range stmts {
@@ -110,6 +116,18 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 	}
 	defer insFTS.Close()
 
+	delSessFTS, err := tx.Prepare(`DELETE FROM sessions_fts WHERE session_pk = ?`)
+	if err != nil {
+		return err
+	}
+	defer delSessFTS.Close()
+
+	insSessFTS, err := tx.Prepare(`INSERT INTO sessions_fts(session_pk, title, project) VALUES(?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer insSessFTS.Close()
+
 	bySession := map[string][]Message{}
 	for _, m := range msgs {
 		bySession[m.SourceID] = append(bySession[m.SourceID], m)
@@ -127,6 +145,12 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 		}
 		if _, err := delFTS.Exec(pk); err != nil {
 			return err
+		}
+		if _, err := delSessFTS.Exec(pk); err != nil {
+			return err
+		}
+		if _, err := insSessFTS.Exec(pk, s.Title, s.Project); err != nil {
+			return fmt.Errorf("insert session_fts %s: %w", pk, err)
 		}
 		for _, m := range bySession[s.SourceID] {
 			text := trimText(m.Text)
@@ -217,28 +241,64 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 	}
 	args = append(args, limit)
 
-	q := `SELECT s.id, s.source, s.source_id, COALESCE(s.project,''), COALESCE(s.title,''), COALESCE(s.started_at,0),
-	             f.idx, f.role,
-	             snippet(messages_fts, 4, '«', '»', '…', 12),
-	             bm25(messages_fts)
-	      FROM messages_fts f
-	      JOIN sessions s ON s.id = f.session_pk
-	      WHERE ` + strings.Join(where, " AND ") + `
-	      ORDER BY (bm25(messages_fts) * 1.0) - (s.started_at / 1.0e13) ASC
-	      LIMIT ?`
+	// Two FTS sources: message bodies and session titles/projects.
+	// We UNION ALL and dedup in Go, keeping the best (most negative bm25) hit per session.
+	bodyWhere := append([]string{}, where...)                 // messages_fts MATCH ? + filters
+	titleWhere := []string{"sessions_fts MATCH ?"}            // separate match
+	titleArgs := []any{ftsQuery}
+	for _, w := range where[1:] {
+		titleWhere = append(titleWhere, w)
+	}
+	titleArgs = append(titleArgs, args[1:len(args)-1]...) // copy filter args (exclude old MATCH + limit)
 
-	rows, err := ix.db.Query(q, args...)
+	q := `
+SELECT id, source, source_id, project, title, started_at, idx, role, snippet, rank FROM (
+  SELECT s.id AS id, s.source AS source, s.source_id AS source_id,
+         COALESCE(s.project,'') AS project, COALESCE(s.title,'') AS title,
+         COALESCE(s.started_at,0) AS started_at,
+         f.idx AS idx, f.role AS role,
+         snippet(messages_fts, 4, '«', '»', '…', 12) AS snippet,
+         bm25(messages_fts) AS rank
+    FROM messages_fts f JOIN sessions s ON s.id = f.session_pk
+   WHERE ` + strings.Join(bodyWhere, " AND ") + `
+  UNION ALL
+  SELECT s.id, s.source, s.source_id,
+         COALESCE(s.project,''), COALESCE(s.title,''),
+         COALESCE(s.started_at,0),
+         -1 AS idx, 'title' AS role,
+         '['||snippet(sessions_fts, 1, '«', '»', '…', 12)||']' AS snippet,
+         bm25(sessions_fts) * 1.4 AS rank   -- title hits get a small boost
+    FROM sessions_fts JOIN sessions s ON s.id = sessions_fts.session_pk
+   WHERE ` + strings.Join(titleWhere, " AND ") + `
+)
+ORDER BY (rank * 1.0) - (started_at / 1.0e13) ASC
+LIMIT ?`
+
+	allArgs := make([]any, 0, len(args)+len(titleArgs))
+	allArgs = append(allArgs, args[:len(args)-1]...) // body args without limit
+	allArgs = append(allArgs, titleArgs...)
+	allArgs = append(allArgs, args[len(args)-1])
+
+	rows, err := ix.db.Query(q, allArgs...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var hits []Hit
+	seen := map[string]int{} // session_id → idx in hits; keep best snippet only
 	for rows.Next() {
 		var h Hit
 		if err := rows.Scan(&h.SessionID, &h.Source, &h.SourceID, &h.Project, &h.Title,
 			&h.StartedAt, &h.MsgIdx, &h.Role, &h.Snippet, &h.Rank); err != nil {
 			return nil, err
 		}
+		if prev, ok := seen[h.SessionID]; ok {
+			if h.Rank < hits[prev].Rank {
+				hits[prev] = h
+			}
+			continue
+		}
+		seen[h.SessionID] = len(hits)
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
