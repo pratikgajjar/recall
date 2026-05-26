@@ -172,6 +172,26 @@ func trimText(s string) string {
 	return s
 }
 
+// BulkMode toggles SQLite pragmas tuned for bulk ingest. Safe because the
+// recall index is disposable: a crash mid-`recall index` just means rerun.
+// Callers should defer ix.BulkMode(false).
+//
+// synchronous=OFF       — skip fsync at commit (~2× faster on macOS APFS)
+// journal_mode=MEMORY   — keep the rollback journal off disk for this run
+//                          (WAL stays the steady state when bulk is off)
+// cache_size=-262144    — 256 MB page cache, plenty for our index
+func (ix *Index) BulkMode(on bool) {
+	if on {
+		_, _ = ix.db.Exec(`PRAGMA synchronous=OFF`)
+		_, _ = ix.db.Exec(`PRAGMA journal_mode=MEMORY`)
+		_, _ = ix.db.Exec(`PRAGMA cache_size=-262144`)
+		return
+	}
+	_, _ = ix.db.Exec(`PRAGMA synchronous=NORMAL`)
+	_, _ = ix.db.Exec(`PRAGMA journal_mode=WAL`)
+	_, _ = ix.db.Exec(`PRAGMA cache_size=-65536`)
+}
+
 func (ix *Index) SetMeta(k, v string) error {
 	_, err := ix.db.Exec(`INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, k, v)
 	return err

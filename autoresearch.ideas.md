@@ -5,17 +5,23 @@ when ripe; delete when stale or done.
 
 ## Indexing speed
 
-- **Cursor full scan: stream JSON instead of `json.Unmarshal`.** Each bubble
-  blob is parsed in full just to extract `text` / `richText`. Use
-  `github.com/valyala/fastjson` or a manual scanner to grab one field; should
-  cut Cursor full-scan from ~60s to ~10–15s.
-- **Parallel adapters.** Today adapters run sequentially. They share no state
-  beyond the index DB and the index supports concurrent writers via a Tx-per-
-  adapter pattern. Easy 2–3× on cold builds.
-- **Parallel bubble decode.** Inside CursorAdapter, decode bubbles in a worker
-  pool (GOMAXPROCS workers reading a channel of raw `[]byte`).
-- **SQLite write tuning.** `PRAGMA journal_mode=WAL` is set; also try
-  `PRAGMA synchronous=OFF` during ingest, then back to NORMAL.
+- ~~Stream JSON for cursor bubbles.~~ DONE — sonic ConfigFastest + typed
+  structs, 60s → 37s for cursor phase. (commit 485661e)
+- ~~Naive parallel adapters.~~ TRIED, REVERTED — buffering all 4 adapters'
+  results in RAM (~150 MB from pi alone) before serial ingest blew wall time
+  from 82s → 215s due to GC pressure. (would need true streaming pipeline)
+- **Streaming Scan→Ingest pipeline.** Make `Scan` return a channel of
+  `(Session, []Message)` so we don't buffer the entire corpus before writing.
+  Then parallel adapters become viable. Bigger refactor; deferred.
+- **Parallel bubble decode within cursor.** Inside CursorAdapter, decode
+  bubbles in a worker pool (GOMAXPROCS workers reading a channel of raw
+  `[]byte`). Cursor is now ~50s on cold I/O; ~25-30s of that is JSON decode.
+- **SQLite write tuning during ingest.** Try `PRAGMA synchronous=OFF` +
+  `PRAGMA temp_store=MEMORY` + larger `cache_size` during bulk ingest, then
+  back to NORMAL. Low risk; the index is disposable anyway.
+- **Skip cursor bubbles with no top-level `text` early.** Sonic still has to
+  decode 4 GB of `toolFormerData`. If we could pre-filter blobs that don't
+  contain `"text":` near the start, decode could skip them entirely.
 
 ## Index size
 

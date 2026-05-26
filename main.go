@@ -210,6 +210,10 @@ func runIndex(args []string) error {
 	}
 	defer ix.Close()
 
+	// Bulk ingest pragmas: safe because the index is disposable.
+	ix.BulkMode(true)
+	defer ix.BulkMode(false)
+
 	start := time.Now()
 	var grand int
 	for _, ad := range defaultAdapters() {
