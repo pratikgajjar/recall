@@ -120,10 +120,6 @@ func (a *CursorAdapter) OpenURL(sourceID string) string {
 // composerData or bubble rows have rowid > N are re-ingested.
 func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 	prevRowID := parseCursorCkpt(prev)
-	cidToProject, err := a.mapComposersToProjects()
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("workspace scan: %w", err)
-	}
 
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
 	db, err := sql.Open("sqlite", gpath+"?mode=ro&_pragma=query_only(true)&immutable=1")
@@ -138,15 +134,25 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	// have rowid > prevRowID.
 	touched := map[string]bool{}
 	if prevRowID > 0 {
-		ids, maxR, err := a.collectTouchedComposers(db, prevRowID)
+		ids, _, err := a.collectTouchedComposers(db, prevRowID)
 		if err != nil {
 			return nil, nil, "", err
 		}
 		for _, id := range ids {
 			touched[id] = true
 		}
-		// Capture the new max rowid early so we can emit it even on empty diff.
-		_ = maxR
+		// Fast path: incremental scan with nothing new — emit fresh
+		// checkpoint without touching workspaceStorage at all.
+		if len(touched) == 0 {
+			next, _ := a.currentMaxRowID(db)
+			return nil, nil, encodeCursorCkpt(next), nil
+		}
+	}
+
+	// We will (re)ingest at least one composer, so we need project info.
+	cidToProject, err := a.mapComposersToProjects()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("workspace scan: %w", err)
 	}
 
 	// Load composerData rows. On incremental, restrict to touched composers.

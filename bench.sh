@@ -87,7 +87,7 @@ jq -nc \
   --argjson binary_size_mb "$binary_mb" \
   --arg full_index_seconds "${full_s:-}" \
   '{ts:$ts, commit:$commit, status:$status, notes:$notes,
-    primary:"incremental_index_ms",
+    primary:"full_index_seconds",
     incremental_index_ms:$incremental_index_ms,
     query_ms:$query_ms,
     index_size_mb:$index_size_mb,

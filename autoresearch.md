@@ -14,22 +14,31 @@ Make `recall` indispensable on its own merits:
 
 ## Primary metric
 
-**`incremental_index_ms`** — wall-clock milliseconds for `recall index` to
-complete a re-run when no source data has changed since the last index.
+**`full_index_seconds`** — wall-clock seconds for `recall index --full` from
+a cold start (`rm -rf ~/.recall` first). Current ≈80s on real data (1,514
+Cursor + 27 Claude + 1,058 Codex sessions; 96k messages; ~4 GB of blobs).
 
 Direction: **lower is better.**
 
-Why this metric: the v0.1 hot loop is `cd <project> && recall index && recall <q>`.
-If `recall index` is fast on every shell prompt, we never need a daemon, a
-file watcher, or an MCP server's freshness ceremony. It just works.
+Why this metric: incremental indexing already hit 10ms — essentially free
+on the hot loop. The remaining friction is the first-time setup cost, which
+also dominates the developer feedback loop when iterating on adapters.
+Cursor full scan is ~58s of the 80s — the JSON-decode pass through 245k
+bubble blobs is the largest single cost.
+
+### Earlier primary (kept as secondary)
+
+**`incremental_index_ms`** — re-run with no source changes. Hit 10ms in
+commit ca802e8. We monitor it; do not regress.
 
 ## Secondary metrics (watched, not optimized for)
 
-- `full_index_seconds` — cold rebuild after `rm -rf ~/.recall`. Current ~80s.
+- `incremental_index_ms` — must stay <50ms.
 - `incremental_one_new_ms` — re-run after one new chat appeared in one source.
-- `query_ms` — `recall "import cycle" --limit 5` p50. Already sub-10ms.
-- `index_size_mb` — disk footprint of `~/.recall/index.sqlite`. Current ~70 MB.
-- `binary_size_mb` — output of `go build`. Currently ~10 MB.
+- `query_ms` — `recall "import cycle" --limit 5` p50, includes cold-start
+  overhead of the Go binary. Acceptable up to 100ms.
+- `index_size_mb` — disk footprint. Acceptable up to ~150 MB on this corpus.
+- `binary_size_mb` — `go build` output. Acceptable up to 15 MB.
 
 A primary improvement is kept even if a secondary regresses, unless the
 secondary regresses catastrophically (e.g. binary doubles, query >100ms).
