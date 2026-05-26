@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,20 +112,17 @@ func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate b
 	var cwd string
 
 	for sc.Scan() {
-		var ev map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+		var ev ClaudeEvent
+		if err := JSONUnmarshal(sc.Bytes(), &ev); err != nil {
 			continue
 		}
-		if cwd == "" {
-			if c, _ := ev["cwd"].(string); c != "" {
-				cwd = c
-			}
+		if cwd == "" && ev.CWD != "" {
+			cwd = ev.CWD
 		}
-		ty, _ := ev["type"].(string)
-		if ty != "user" && ty != "assistant" {
+		if ev.Type != "user" && ev.Type != "assistant" {
 			continue
 		}
-		ts := parseTime(ev["timestamp"])
+		ts := parseClaudeTime(ev.Timestamp)
 		if ts > 0 {
 			if startedAt == 0 || ts < startedAt {
 				startedAt = ts
@@ -135,12 +131,11 @@ func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate b
 				endedAt = ts
 			}
 		}
-		role := ty
-		text := extractClaudeText(ev["message"])
+		text := ev.Message.Text()
 		if text == "" {
 			continue
 		}
-		if role == "user" && firstUser == "" && !looksLikeWrapper(text) {
+		if ev.Type == "user" && firstUser == "" && !looksLikeWrapper(text) {
 			firstUser = text
 		}
 		stored := text
@@ -148,7 +143,7 @@ func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate b
 			stored = stored[:excerptMax]
 		}
 		msgs = append(msgs, Message{
-			SourceID: sessID, Idx: idx, Role: role, TS: ts, Text: stored,
+			SourceID: sessID, Idx: idx, Role: ev.Type, TS: ts, Text: stored,
 		})
 		idx++
 	}
@@ -168,55 +163,100 @@ func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate b
 	}, msgs, nil
 }
 
-// extractClaudeText pulls assistant/user text out of the Claude Code event message field.
-// message can be: {content:"…"} or {content:[{type:"text",text:"…"}, …]}.
-func extractClaudeText(v any) string {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	c := m["content"]
-	switch cv := c.(type) {
-	case string:
-		return cv
-	case []any:
-		var b strings.Builder
-		for _, part := range cv {
-			pm, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			switch pm["type"] {
-			case "text":
-				if t, _ := pm["text"].(string); t != "" {
-					if b.Len() > 0 {
-						b.WriteByte('\n')
-					}
-					b.WriteString(t)
-				}
-			case "tool_use":
-				if name, _ := pm["name"].(string); name != "" {
-					b.WriteString("[tool_use:")
-					b.WriteString(name)
-					b.WriteByte(']')
-				}
-			case "tool_result":
-				if t, ok := pm["content"].(string); ok && t != "" {
-					b.WriteString("[tool_result] ")
-					if len(t) > 400 {
-						t = t[:400]
-					}
-					b.WriteString(t)
-				}
-			}
-		}
-		return b.String()
-	}
-	return ""
+// ClaudeEvent is the typed view of one line in a Claude Code JSONL file.
+// Only fields recall consumes are decoded; sonic skips everything else.
+type ClaudeEvent struct {
+	Type      string        `json:"type"`      // "user" | "assistant" | …
+	Timestamp string        `json:"timestamp"` // RFC3339
+	CWD       string        `json:"cwd"`
+	Message   ClaudeMessage `json:"message"`
 }
 
-func parseTime(v any) int64 {
-	s, _ := v.(string)
+// ClaudeMessage models the `message` field. Content is sometimes a plain
+// string, sometimes an array of typed parts.
+type ClaudeMessage struct {
+	Role    string            `json:"role"`
+	Content ClaudeMessageBody `json:"content"`
+}
+
+// ClaudeMessageBody handles content being either a string or an array of parts.
+type ClaudeMessageBody struct {
+	str   string
+	parts []ClaudePart
+}
+
+// UnmarshalJSON dispatches on the first non-whitespace byte.
+func (b *ClaudeMessageBody) UnmarshalJSON(data []byte) error {
+	for i, c := range data {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '"':
+			return JSONUnmarshal(data[i:], &b.str)
+		case '[':
+			return JSONUnmarshal(data[i:], &b.parts)
+		}
+		break
+	}
+	return nil
+}
+
+// ClaudePart is one element inside a content array.
+type ClaudePart struct {
+	Type    string `json:"type"` // "text" | "tool_use" | "tool_result"
+	Text    string `json:"text"`
+	Name    string `json:"name"`    // tool_use
+	Content string `json:"content"` // tool_result (only when it's a plain string)
+}
+
+// Text flattens a message body to the searchable text excerpt recall stores.
+func (m ClaudeMessage) Text() string {
+	if m.Content.str != "" {
+		return m.Content.str
+	}
+	if len(m.Content.parts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range m.Content.parts {
+		switch p.Type {
+		case "text":
+			if p.Text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(p.Text)
+		case "tool_use":
+			if p.Name == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString("[tool_use:")
+			b.WriteString(p.Name)
+			b.WriteByte(']')
+		case "tool_result":
+			if p.Content == "" {
+				continue
+			}
+			t := p.Content
+			if len(t) > 400 {
+				t = t[:400]
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString("[tool_result] ")
+			b.WriteString(t)
+		}
+	}
+	return b.String()
+}
+
+func parseClaudeTime(s string) int64 {
 	if s == "" {
 		return 0
 	}
@@ -226,6 +266,12 @@ func parseTime(v any) int64 {
 		}
 	}
 	return 0
+}
+
+// parseTime kept for codex.go / pi.go that pass interface values from raw maps.
+func parseTime(v any) int64 {
+	s, _ := v.(string)
+	return parseClaudeTime(s)
 }
 
 // unsanitize converts "-Users-pratikgajjar-code-acme-api" → "/Users/pratikgajjar/code/acme-api".

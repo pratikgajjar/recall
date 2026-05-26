@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -42,7 +41,7 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 			BubbleID string `json:"bubbleId"`
 		} `json:"fullConversationHeadersOnly"`
 	}
-	if err := json.Unmarshal(blob, &cb); err != nil {
+	if err := JSONUnmarshal(blob, &cb); err != nil {
 		return nil, err
 	}
 
@@ -184,11 +183,11 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 		ServerID string `json:"serverBubbleId"`
 	}
 	type composerBlob struct {
-		ComposerID                   string           `json:"composerId"`
-		Text                         string           `json:"text"`
-		CreatedAt                    int64            `json:"createdAt"`
-		Name                         string           `json:"name"`
-		FullConversationHeadersOnly  []composerHeader `json:"fullConversationHeadersOnly"`
+		ComposerID                  string           `json:"composerId"`
+		Text                        string           `json:"text"`
+		CreatedAt                   int64            `json:"createdAt"`
+		Name                        string           `json:"name"`
+		FullConversationHeadersOnly []composerHeader `json:"fullConversationHeadersOnly"`
 	}
 
 	type composer struct {
@@ -206,7 +205,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 			return nil, nil, "", err
 		}
 		var cb composerBlob
-		if err := json.Unmarshal(val, &cb); err != nil {
+		if err := JSONUnmarshal(val, &cb); err != nil {
 			continue
 		}
 		cid := strings.TrimPrefix(key, "composerData:")
@@ -390,23 +389,23 @@ func bubbleRole(t int) string {
 	return "tool"
 }
 
-// extractBubbleText pulls the human-readable body out of a bubble value blob.
-// Bubbles have many shapes; we try `text`, `richText` plaintext, then `content`.
-//
-// Performance note: bubble blobs routinely reach tens of MB because of the
-// `toolFormerData` field (file contents, terminal output, model context).
-// Decoding into map[string]any allocates objects for every nested key in that
-// payload — wasted work since we ignore everything but text/richText/content.
-// The typed struct below makes the decoder skip unknown fields cleanly: it
-// still scans them to advance the token stream, but no allocations.
+// CursorBubble is the typed view recall keeps from one Cursor bubble blob.
+// Bubbles can be tens of MB because of `toolFormerData` (file contents,
+// terminal output, model context) — none of which we want. Decoding into
+// this struct via sonic (see jsonx.go) lets the decoder skip the heavy
+// fields without allocating into a map[string]any.
+type CursorBubble struct {
+	Type     int    `json:"type"`
+	Text     string `json:"text"`
+	RichText string `json:"richText"`
+	Content  string `json:"content"`
+}
+
+// extractBubbleText pulls the human-readable body out of a bubble blob.
+// Returns the body text and the message type code (1=user, 2=assistant, …).
 func extractBubbleText(raw []byte) (string, int) {
-	var b struct {
-		Type     int    `json:"type"`
-		Text     string `json:"text"`
-		RichText string `json:"richText"`
-		Content  string `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &b); err != nil {
+	var b CursorBubble
+	if err := JSONUnmarshal(raw, &b); err != nil {
 		return "", 0
 	}
 	if b.Text != "" {
@@ -423,34 +422,48 @@ func extractBubbleText(raw []byte) (string, int) {
 	return "", b.Type
 }
 
-// plainFromRichText walks a draft-js style payload looking for any "text" leaves.
+// richTextDoc mirrors the relevant subset of Cursor's draft-js payload —
+// a recursive tree of blocks where leaf nodes carry `text`.
+type richTextDoc struct {
+	Root struct {
+		Children []richTextNode `json:"children"`
+	} `json:"root"`
+}
+
+type richTextNode struct {
+	Text     string         `json:"text"`
+	Children []richTextNode `json:"children"`
+}
+
+// plainFromRichText extracts visible text from a Cursor richText payload.
+// The payload is a JSON-encoded string of a Lexical/draft-js style doc.
+// We try the typed shape first; if it doesn't look like a known doc we
+// just return the raw string (Cursor occasionally stores plaintext here).
 func plainFromRichText(s string) string {
-	var doc any
-	if err := json.Unmarshal([]byte(s), &doc); err != nil {
-		return s // raw string fallback
+	var doc richTextDoc
+	if err := JSONUnmarshal([]byte(s), &doc); err != nil || len(doc.Root.Children) == 0 {
+		return s
 	}
-	var b strings.Builder
-	var walk func(v any)
-	walk = func(v any) {
-		switch t := v.(type) {
-		case map[string]any:
-			if txt, ok := t["text"].(string); ok && txt != "" {
-				if b.Len() > 0 {
-					b.WriteByte('\n')
-				}
-				b.WriteString(txt)
+	var sb strings.Builder
+	var walk func(n richTextNode)
+	walk = func(n richTextNode) {
+		if n.Text != "" {
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
 			}
-			for _, child := range t {
-				walk(child)
-			}
-		case []any:
-			for _, child := range t {
-				walk(child)
-			}
+			sb.WriteString(n.Text)
+		}
+		for _, child := range n.Children {
+			walk(child)
 		}
 	}
-	walk(doc)
-	return b.String()
+	for _, c := range doc.Root.Children {
+		walk(c)
+	}
+	if sb.Len() == 0 {
+		return s
+	}
+	return sb.String()
 }
 
 // mapComposersToProjects iterates every workspaceStorage/<hash>/state.vscdb,
@@ -484,7 +497,7 @@ func (a *CursorAdapter) mapComposersToProjects() (map[string]string, error) {
 					ComposerID string `json:"composerId"`
 				} `json:"allComposers"`
 			}
-			if err := json.Unmarshal(blob, &data); err == nil {
+			if err := JSONUnmarshal(blob, &data); err == nil {
 				for _, c := range data.AllComposers {
 					if c.ComposerID != "" && folder != "" {
 						out[c.ComposerID] = folder
@@ -505,7 +518,7 @@ func readWorkspaceFolder(path string) string {
 	var w struct {
 		Folder string `json:"folder"`
 	}
-	if err := json.Unmarshal(b, &w); err != nil {
+	if err := JSONUnmarshal(b, &w); err != nil {
 		return ""
 	}
 	if w.Folder == "" {

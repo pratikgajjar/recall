@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -111,28 +110,22 @@ func (a *PiAdapter) readSession(path string, truncate bool) (*Session, []Message
 	idx := 0
 
 	for sc.Scan() {
-		var ev map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+		var ev PiEvent
+		if err := JSONUnmarshal(sc.Bytes(), &ev); err != nil {
 			continue
 		}
-		ty, _ := ev["type"].(string)
-		ts := parseTime(ev["timestamp"])
-		switch ty {
+		ts := parseClaudeTime(ev.Timestamp)
+		switch ev.Type {
 		case "session":
-			if id, _ := ev["id"].(string); id != "" {
-				sessID = id
+			if ev.ID != "" {
+				sessID = ev.ID
 			}
-			if cwd, _ := ev["cwd"].(string); cwd != "" {
-				project = cwd
+			if ev.CWD != "" {
+				project = ev.CWD
 			}
 			startedAt = ts
 		case "message":
-			m, _ := ev["message"].(map[string]any)
-			if m == nil {
-				continue
-			}
-			role, _ := m["role"].(string)
-			text := extractPiText(m)
+			text := ev.Message.Text()
 			if text == "" {
 				continue
 			}
@@ -142,7 +135,7 @@ func (a *PiAdapter) readSession(path string, truncate bool) (*Session, []Message
 			if startedAt == 0 || (ts > 0 && ts < startedAt) {
 				startedAt = ts
 			}
-			if role == "user" && firstUser == "" && !looksLikeWrapper(text) {
+			if ev.Message.Role == "user" && firstUser == "" && !looksLikeWrapper(text) {
 				firstUser = text
 			}
 			stored := text
@@ -150,7 +143,7 @@ func (a *PiAdapter) readSession(path string, truncate bool) (*Session, []Message
 				stored = stored[:excerptMax]
 			}
 			msgs = append(msgs, Message{
-				SourceID: sessID, Idx: idx, Role: role, TS: ts, Text: stored,
+				SourceID: sessID, Idx: idx, Role: ev.Message.Role, TS: ts, Text: stored,
 			})
 			idx++
 		}
@@ -166,81 +159,130 @@ func (a *PiAdapter) readSession(path string, truncate bool) (*Session, []Message
 	}, msgs, nil
 }
 
-// extractPiText handles content arrays with mixed parts:
+// PiEvent is one line in a pi JSONL session file.
+type PiEvent struct {
+	Type      string    `json:"type"` // "session" | "message" | …
+	ID        string    `json:"id"`   // session id (when type=session)
+	CWD       string    `json:"cwd"`  // session cwd
+	Timestamp string    `json:"timestamp"`
+	Message   PiMessage `json:"message"`
+}
+
+// PiMessage is the body of a type:"message" event.
+type PiMessage struct {
+	Role    string        `json:"role"` // user | assistant | toolResult | system
+	Content PiMessageBody `json:"content"`
+}
+
+// PiMessageBody is either a plain string or an array of typed parts.
+type PiMessageBody struct {
+	str   string
+	parts []PiPart
+}
+
+func (b *PiMessageBody) UnmarshalJSON(data []byte) error {
+	for i, c := range data {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '"':
+			return JSONUnmarshal(data[i:], &b.str)
+		case '[':
+			return JSONUnmarshal(data[i:], &b.parts)
+		}
+		break
+	}
+	return nil
+}
+
+// PiPart is one element inside a content array.
 //
-//	{type:"text", text:"…"}
-//	{type:"thinking", thinking:"…"}
-//	{type:"toolCall", name, input}
-//	{type:"toolResult", content:[{type:"text", text:"…"}]} or string
-//
-// For toolResult, message.content can also be a flat string.
-func extractPiText(m map[string]any) string {
-	c := m["content"]
-	switch cv := c.(type) {
-	case string:
-		return cv
-	case []any:
-		var b strings.Builder
-		for _, part := range cv {
-			pm, ok := part.(map[string]any)
-			if !ok {
+//	{type:"text",       text:"…"}
+//	{type:"thinking",   thinking:"…"}    — dropped, low signal
+//	{type:"toolCall",   name:"bash", input:{…}}
+//	{type:"toolResult", content: string | [PiPart]}
+type PiPart struct {
+	Type    string       `json:"type"`
+	Text    string       `json:"text"`
+	Name    string       `json:"name"`
+	Content PiToolResult `json:"content"`
+}
+
+// PiToolResult is content of a toolResult — string or array of parts.
+type PiToolResult struct {
+	str   string
+	parts []PiPart
+}
+
+func (r *PiToolResult) UnmarshalJSON(data []byte) error {
+	for i, c := range data {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '"':
+			return JSONUnmarshal(data[i:], &r.str)
+		case '[':
+			return JSONUnmarshal(data[i:], &r.parts)
+		}
+		break
+	}
+	return nil
+}
+
+// Text flattens a pi message body to the searchable excerpt.
+func (m PiMessage) Text() string {
+	if m.Content.str != "" {
+		return m.Content.str
+	}
+	var b strings.Builder
+	for _, p := range m.Content.parts {
+		switch p.Type {
+		case "text":
+			if p.Text == "" {
 				continue
 			}
-			switch pm["type"] {
-			case "text":
-				if t, _ := pm["text"].(string); t != "" {
-					if b.Len() > 0 {
-						b.WriteByte('\n')
-					}
-					b.WriteString(t)
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(p.Text)
+		case "thinking":
+			// drop — chain-of-thought, very noisy
+		case "toolCall":
+			if p.Name == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString("[tool:")
+			b.WriteString(p.Name)
+			b.WriteByte(']')
+		case "toolResult":
+			if s := p.Content.str; s != "" {
+				if len(s) > 400 {
+					s = s[:400]
 				}
-			case "thinking":
-				// Skip in FTS — model's chain-of-thought, low signal-to-noise.
-			case "toolCall":
-				if name, _ := pm["name"].(string); name != "" {
-					if b.Len() > 0 {
-						b.WriteByte('\n')
-					}
-					b.WriteString("[tool:")
-					b.WriteString(name)
-					b.WriteByte(']')
+				if b.Len() > 0 {
+					b.WriteByte('\n')
 				}
-			case "toolResult":
-				inner := pm["content"]
-				switch iv := inner.(type) {
-				case string:
-					if iv != "" {
-						if b.Len() > 0 {
-							b.WriteByte('\n')
-						}
-						s := iv
-						if len(s) > 400 {
-							s = s[:400]
-						}
-						b.WriteString("[result] ")
-						b.WriteString(s)
-					}
-				case []any:
-					for _, ip := range iv {
-						ipm, ok := ip.(map[string]any)
-						if !ok {
-							continue
-						}
-						if t, _ := ipm["text"].(string); t != "" {
-							if b.Len() > 0 {
-								b.WriteByte('\n')
-							}
-							if len(t) > 400 {
-								t = t[:400]
-							}
-							b.WriteString("[result] ")
-							b.WriteString(t)
-						}
-					}
+				b.WriteString("[result] ")
+				b.WriteString(s)
+			}
+			for _, inner := range p.Content.parts {
+				if inner.Text == "" {
+					continue
 				}
+				t := inner.Text
+				if len(t) > 400 {
+					t = t[:400]
+				}
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString("[result] ")
+				b.WriteString(t)
 			}
 		}
-		return b.String()
 	}
-	return ""
+	return b.String()
 }

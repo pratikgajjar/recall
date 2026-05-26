@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -99,34 +98,26 @@ func (a *CodexAdapter) readSession(path string, truncate bool) (*Session, []Mess
 	idx := 0
 
 	for sc.Scan() {
-		var ev map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+		var ev CodexEvent
+		if err := JSONUnmarshal(sc.Bytes(), &ev); err != nil {
 			continue
 		}
-		ty, _ := ev["type"].(string)
-		ts := parseTime(ev["timestamp"])
-		switch ty {
+		ts := parseClaudeTime(ev.Timestamp)
+		switch ev.Type {
 		case "session_meta":
-			p, _ := ev["payload"].(map[string]any)
-			if p == nil {
-				continue
+			if ev.Payload.ID != "" {
+				sessID = ev.Payload.ID
 			}
-			if id, _ := p["id"].(string); id != "" {
-				sessID = id
+			if ev.Payload.CWD != "" {
+				project = ev.Payload.CWD
 			}
-			if cwd, _ := p["cwd"].(string); cwd != "" {
-				project = cwd
-			}
-			startedAt = parseTime(p["timestamp"])
-			if startedAt == 0 {
+			if t := parseClaudeTime(ev.Payload.Timestamp); t > 0 {
+				startedAt = t
+			} else if ts > 0 {
 				startedAt = ts
 			}
 		case "response_item":
-			p, _ := ev["payload"].(map[string]any)
-			if p == nil {
-				continue
-			}
-			role, text := extractCodexMsg(p)
+			role, text := ev.Payload.flatten()
 			if text == "" {
 				continue
 			}
@@ -160,72 +151,101 @@ func (a *CodexAdapter) readSession(path string, truncate bool) (*Session, []Mess
 	}, msgs, nil
 }
 
-// extractCodexMsg handles response_item.payload variants:
-//
-//	{type:"message", role:"user"|"assistant", content:[{type:"input_text"|"output_text"|"text", text:"…"}]}
-//	{type:"function_call", name, arguments}
-//	{type:"function_call_output", call_id, output:{...}}
-//	{type:"reasoning", summary:[{type:"summary_text", text:"…"}]}
-func extractCodexMsg(p map[string]any) (role, text string) {
-	switch p["type"] {
-	case "message":
-		role, _ = p["role"].(string)
-		c, ok := p["content"].([]any)
-		if !ok {
-			return role, ""
+// CodexEvent models one JSONL line from a Codex rollout file.
+// Only the fields recall consumes are typed; sonic skips the rest.
+type CodexEvent struct {
+	Type      string       `json:"type"` // "session_meta" | "response_item" | …
+	Timestamp string       `json:"timestamp"`
+	Payload   CodexPayload `json:"payload"`
+}
+
+// CodexPayload is the union of fields seen across session_meta and
+// response_item.payload variants. Unused fields stay zero-valued.
+type CodexPayload struct {
+	// session_meta
+	ID  string `json:"id"`
+	CWD string `json:"cwd"`
+
+	// response_item — every variant carries a `type`.
+	ItemType  string       `json:"type"`
+	Role      string       `json:"role"`      // message
+	Content   []CodexPart  `json:"content"`   // message
+	Name      string       `json:"name"`      // function_call
+	Arguments string       `json:"arguments"` // function_call
+	Output    CodexCallOut `json:"output"`    // function_call_output
+	Summary   []CodexPart  `json:"summary"`   // reasoning
+
+	// session_meta also has a timestamp at the payload level.
+	Timestamp string `json:"timestamp"`
+}
+
+// CodexPart is one element of `content` / `summary` in a response_item.
+type CodexPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// CodexCallOut wraps function_call_output.output, which is sometimes an
+// object {content:"…"} and sometimes a raw string. UnmarshalJSON handles
+// the polymorphism so the rest of the code sees a single `Content` field.
+type CodexCallOut struct {
+	Content string `json:"content"`
+}
+
+func (o *CodexCallOut) UnmarshalJSON(data []byte) error {
+	for i, c := range data {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '"':
+			return JSONUnmarshal(data[i:], &o.Content)
+		case '{':
+			type alias CodexCallOut
+			return JSONUnmarshal(data[i:], (*alias)(o))
 		}
+		break
+	}
+	return nil
+}
+
+// flatten reduces a response_item payload to (role, text) — recall's
+// canonical excerpt form.
+func (p CodexPayload) flatten() (role, text string) {
+	switch p.ItemType {
+	case "message":
 		var b strings.Builder
-		for _, part := range c {
-			pm, ok := part.(map[string]any)
-			if !ok {
+		for _, part := range p.Content {
+			if part.Text == "" {
 				continue
 			}
-			if t, _ := pm["text"].(string); t != "" {
-				if b.Len() > 0 {
-					b.WriteByte('\n')
-				}
-				b.WriteString(t)
+			if b.Len() > 0 {
+				b.WriteByte('\n')
 			}
+			b.WriteString(part.Text)
 		}
-		return role, b.String()
+		return p.Role, b.String()
 	case "function_call":
-		name, _ := p["name"].(string)
-		args, _ := p["arguments"].(string)
+		args := p.Arguments
 		if len(args) > 400 {
 			args = args[:400]
 		}
-		return "tool", "[call " + name + "] " + args
+		return "tool", "[call " + p.Name + "] " + args
 	case "function_call_output":
-		out, _ := p["output"].(map[string]any)
-		if out == nil {
-			return "tool", ""
-		}
-		s, _ := out["content"].(string)
-		if s == "" {
-			b, _ := json.Marshal(out)
-			s = string(b)
-		}
+		s := p.Output.Content
 		if len(s) > 400 {
 			s = s[:400]
 		}
 		return "tool", "[output] " + s
 	case "reasoning":
-		sum, ok := p["summary"].([]any)
-		if !ok {
-			return "", ""
-		}
 		var b strings.Builder
-		for _, part := range sum {
-			pm, ok := part.(map[string]any)
-			if !ok {
+		for _, part := range p.Summary {
+			if part.Text == "" {
 				continue
 			}
-			if t, _ := pm["text"].(string); t != "" {
-				if b.Len() > 0 {
-					b.WriteByte('\n')
-				}
-				b.WriteString(t)
+			if b.Len() > 0 {
+				b.WriteByte('\n')
 			}
+			b.WriteString(part.Text)
 		}
 		return "assistant", b.String()
 	}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/fs"
 )
@@ -18,14 +17,14 @@ func parseFileCkpt(s string) map[string]string {
 		return map[string]string{}
 	}
 	var m map[string]string
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
+	if err := JSONUnmarshal([]byte(s), &m); err != nil {
 		return map[string]string{}
 	}
 	return m
 }
 
 func encodeFileCkpt(m map[string]string) string {
-	b, _ := json.Marshal(m)
+	b, _ := JSONMarshal(m)
 	return string(b)
 }
 
@@ -39,13 +38,13 @@ func parseCursorCkpt(s string) int64 {
 		return 0
 	}
 	var c cursorCkpt
-	if err := json.Unmarshal([]byte(s), &c); err != nil {
+	if err := JSONUnmarshal([]byte(s), &c); err != nil {
 		return 0
 	}
 	return c.RowID
 }
 
 func encodeCursorCkpt(rowid int64) string {
-	b, _ := json.Marshal(cursorCkpt{RowID: rowid})
+	b, _ := JSONMarshal(cursorCkpt{RowID: rowid})
 	return string(b)
 }

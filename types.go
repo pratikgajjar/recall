@@ -2,12 +2,12 @@ package main
 
 // Session is one chat thread (composer / claude session / codex rollout).
 type Session struct {
-	Source    string         // "cursor" | "claude" | "codex"
-	SourceID  string         // native id from the source tool
-	Project   string         // absolute folder path
-	Title     string         // chat name or first-prompt slug
-	StartedAt int64          // unix ms
-	EndedAt   int64          // unix ms
+	Source    string // "cursor" | "claude" | "codex"
+	SourceID  string // native id from the source tool
+	Project   string // absolute folder path
+	Title     string // chat name or first-prompt slug
+	StartedAt int64  // unix ms
+	EndedAt   int64  // unix ms
 	MsgCount  int
 	Meta      map[string]any // extra source-specific bits
 }

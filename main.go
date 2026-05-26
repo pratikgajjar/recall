@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -350,7 +349,7 @@ func runFind(args []string) error {
 		return err
 	}
 	if cf.json {
-		return json.NewEncoder(os.Stdout).Encode(hits)
+		return JSONNewEncoder(os.Stdout).Encode(hits)
 	}
 	printHits(os.Stdout, hits)
 	return nil
@@ -456,7 +455,7 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 		return err
 	}
 	if asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+		return JSONNewEncoder(os.Stdout).Encode(map[string]any{
 			"session":  s,
 			"messages": msgs,
 		})
@@ -557,7 +556,7 @@ func runSessions(args []string) error {
 		return err
 	}
 	if cf.json {
-		return json.NewEncoder(os.Stdout).Encode(hits)
+		return JSONNewEncoder(os.Stdout).Encode(hits)
 	}
 	for _, h := range hits {
 		when := h.StartedTime().Format("2006-01-02 15:04")

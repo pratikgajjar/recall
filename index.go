@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -137,7 +136,7 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 		pk := source + ":" + s.SourceID
 		var metaBlob []byte
 		if len(s.Meta) > 0 {
-			metaBlob, _ = json.Marshal(s.Meta)
+			metaBlob, _ = JSONMarshal(s.Meta)
 		}
 		if _, err := upsertSess.Exec(pk, source, s.SourceID, s.Project, s.Title,
 			s.StartedAt, s.EndedAt, s.MsgCount, string(metaBlob)); err != nil {
@@ -206,16 +205,16 @@ func (ix *Index) Counts() (map[string]int, error) {
 
 // Hit is one matched message with its parent session info.
 type Hit struct {
-	SessionID  string
-	Source     string
-	SourceID   string
-	Project    string
-	Title      string
-	StartedAt  int64
-	MsgIdx     int
-	Role       string
-	Snippet    string // FTS-highlighted excerpt
-	Rank       float64
+	SessionID string
+	Source    string
+	SourceID  string
+	Project   string
+	Title     string
+	StartedAt int64
+	MsgIdx    int
+	Role      string
+	Snippet   string // FTS-highlighted excerpt
+	Rank      float64
 }
 
 func (h Hit) StartedTime() time.Time { return time.UnixMilli(h.StartedAt) }
@@ -251,8 +250,8 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 
 	// Two FTS sources: message bodies and session titles/projects.
 	// We UNION ALL and dedup in Go, keeping the best (most negative bm25) hit per session.
-	bodyWhere := append([]string{}, where...)                 // messages_fts MATCH ? + filters
-	titleWhere := []string{"sessions_fts MATCH ?"}            // separate match
+	bodyWhere := append([]string{}, where...)      // messages_fts MATCH ? + filters
+	titleWhere := []string{"sessions_fts MATCH ?"} // separate match
 	titleArgs := []any{ftsQuery}
 	for _, w := range where[1:] {
 		titleWhere = append(titleWhere, w)
@@ -392,7 +391,7 @@ func (ix *Index) LookupSession(id string) (*Session, error) {
 		return nil, err
 	}
 	if meta.Valid && meta.String != "" {
-		_ = json.Unmarshal([]byte(meta.String), &s.Meta)
+		_ = JSONUnmarshal([]byte(meta.String), &s.Meta)
 	}
 	return &s, nil
 }
