@@ -392,29 +392,35 @@ func bubbleRole(t int) string {
 
 // extractBubbleText pulls the human-readable body out of a bubble value blob.
 // Bubbles have many shapes; we try `text`, `richText` plaintext, then `content`.
+//
+// Performance note: bubble blobs routinely reach tens of MB because of the
+// `toolFormerData` field (file contents, terminal output, model context).
+// Decoding into map[string]any allocates objects for every nested key in that
+// payload — wasted work since we ignore everything but text/richText/content.
+// The typed struct below makes the decoder skip unknown fields cleanly: it
+// still scans them to advance the token stream, but no allocations.
 func extractBubbleText(raw []byte) (string, int) {
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	var b struct {
+		Type     int    `json:"type"`
+		Text     string `json:"text"`
+		RichText string `json:"richText"`
+		Content  string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
 		return "", 0
 	}
-	ttype := 0
-	if t, ok := m["type"].(float64); ok {
-		ttype = int(t)
+	if b.Text != "" {
+		return b.Text, b.Type
 	}
-	if s, _ := m["text"].(string); s != "" {
-		return s, ttype
-	}
-	// richText is sometimes a JSON string of a draft-js doc.
-	if rt, ok := m["richText"].(string); ok && rt != "" {
-		if plain := plainFromRichText(rt); plain != "" {
-			return plain, ttype
+	if b.RichText != "" {
+		if plain := plainFromRichText(b.RichText); plain != "" {
+			return plain, b.Type
 		}
 	}
-	// content slot used in some assistant bubbles
-	if c, ok := m["content"].(string); ok && c != "" {
-		return c, ttype
+	if b.Content != "" {
+		return b.Content, b.Type
 	}
-	return "", ttype
+	return "", b.Type
 }
 
 // plainFromRichText walks a draft-js style payload looking for any "text" leaves.
