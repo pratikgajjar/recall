@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,8 +23,9 @@ USAGE
   recall <query>                     search; prints ranked hits
   recall find <query> [--repo P]     same, with filters
   recall last [--repo P]             print the most recent session as transcript
-  recall show <session-id>           print one session as transcript
+  recall show <session-id>           print one session as transcript (full fidelity)
   recall sessions [--repo P]         list recent sessions
+  recall open <session-id> [--print] reopen the chat in its source tool
   recall doctor                      health check
   recall version
 
@@ -77,6 +79,10 @@ func main() {
 		}
 	case "sessions":
 		if err := runSessions(args); err != nil {
+			fatal(err)
+		}
+	case "open":
+		if err := runOpen(args); err != nil {
 			fatal(err)
 		}
 	default:
@@ -411,24 +417,14 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 	if err != nil {
 		return fmt.Errorf("session %s: %w", id, err)
 	}
-	rows, err := ix.db.Query(`SELECT idx, role, ts, text FROM messages_fts WHERE session_pk = ? ORDER BY idx`, id)
+	// Re-read from source for full fidelity (no excerpt truncation).
+	ad := adapterFor(s.Source)
+	if ad == nil {
+		return fmt.Errorf("no adapter for source %q", s.Source)
+	}
+	msgs, err := ad.Fetch(s.SourceID)
 	if err != nil {
 		return err
-	}
-	defer rows.Close()
-	type tmsg struct {
-		Idx  int    `json:"idx"`
-		Role string `json:"role"`
-		TS   int64  `json:"ts"`
-		Text string `json:"text"`
-	}
-	var msgs []tmsg
-	for rows.Next() {
-		var m tmsg
-		if err := rows.Scan(&m.Idx, &m.Role, &m.TS, &m.Text); err != nil {
-			return err
-		}
-		msgs = append(msgs, m)
 	}
 	if asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
@@ -446,6 +442,64 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 	return nil
 }
 
+func adapterFor(source string) Adapter {
+	for _, a := range defaultAdapters() {
+		if a.ID() == source {
+			return a
+		}
+	}
+	return nil
+}
+
+func runOpen(args []string) error {
+	fs := flag.NewFlagSet("open", flag.ExitOnError)
+	dryRun := fs.Bool("print", false, "print the open URI/cmd instead of launching")
+	flagArgs, posArgs := splitFlagsAndArgs(args, map[string]bool{"print": true})
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(posArgs) == 0 {
+		return errors.New("usage: recall open <session-id>")
+	}
+	ix, err := openIndexOrFail()
+	if err != nil {
+		return err
+	}
+	defer ix.Close()
+	s, err := ix.LookupSession(posArgs[0])
+	if err != nil {
+		return fmt.Errorf("session %s: %w", posArgs[0], err)
+	}
+	ad := adapterFor(s.Source)
+	if ad == nil {
+		return fmt.Errorf("no adapter for source %q", s.Source)
+	}
+	target := ad.OpenURL(s.SourceID)
+	if target == "" {
+		return fmt.Errorf("source %q does not support deep-link open", s.Source)
+	}
+	if *dryRun {
+		fmt.Println(target)
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(target, "cursor://"):
+		// macOS: open <uri> hands off to URL handler
+		return runShell("open", target)
+	default:
+		// CLI invocation form (claude --resume <id>, codex resume <id>) — just print.
+		fmt.Println(target)
+		return nil
+	}
+}
+
+func runShell(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 func runSessions(args []string) error {
 	fs := flag.NewFlagSet("sessions", flag.ExitOnError)
 	var cf commonFlags
@@ -458,8 +512,9 @@ func runSessions(args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.Project == "" {
-		if cwd, err := os.Getwd(); err == nil && cf.repo == "" {
+	// Default to current repo only if user gave no other filter.
+	if cf.repo == "" && cf.source == "" && cf.since == "" {
+		if cwd, err := os.Getwd(); err == nil {
 			opts.Project = cwd
 		}
 	}

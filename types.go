@@ -28,6 +28,12 @@ type Adapter interface {
 	// Scan returns all sessions+messages currently stored.
 	// V0 is idempotent (full scan, upsert). V1 will checkpoint.
 	Scan() ([]Session, []Message, error)
+	// Fetch returns the full transcript for one session, untruncated.
+	// Used by `recall show` / `recall last` so piped output is faithful.
+	Fetch(sourceID string) ([]Message, error)
+	// OpenURL returns a best-effort URI/cmd to reopen the chat in its
+	// native tool. Empty string if not supported.
+	OpenURL(sourceID string) string
 }
 
 const excerptMax = 1500

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -50,7 +51,40 @@ func (a *ClaudeAdapter) Scan() ([]Session, []Message, error) {
 	return sessions, msgs, nil
 }
 
+// Fetch re-reads the JSONL for one session and returns untruncated messages.
+func (a *ClaudeAdapter) Fetch(sourceID string) ([]Message, error) {
+	entries, err := os.ReadDir(a.Root)
+	if err != nil {
+		return nil, err
+	}
+	target := sourceID + ".jsonl"
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(a.Root, e.Name(), target)
+		if _, err := os.Stat(p); err == nil {
+			_, msgs, err := a.readSessionFull(p, sourceID)
+			return msgs, err
+		}
+	}
+	return nil, fmt.Errorf("claude session %s not found", sourceID)
+}
+
+// OpenURL — Claude Code resumes via `claude --resume <session-id>` in the project dir.
+func (a *ClaudeAdapter) OpenURL(sourceID string) string {
+	return "claude --resume " + sourceID
+}
+
+func (a *ClaudeAdapter) readSessionFull(path, sessID string) (*Session, []Message, error) {
+	return a.readSessionImpl(path, sessID, "", false)
+}
+
 func (a *ClaudeAdapter) readSession(path, sessID, project string) (*Session, []Message, error) {
+	return a.readSessionImpl(path, sessID, project, true)
+}
+
+func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate bool) (*Session, []Message, error) {
 	fh, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -63,11 +97,17 @@ func (a *ClaudeAdapter) readSession(path, sessID, project string) (*Session, []M
 	idx := 0
 	var startedAt, endedAt int64
 	var firstUser string
+	var cwd string
 
 	for sc.Scan() {
 		var ev map[string]any
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			continue
+		}
+		if cwd == "" {
+			if c, _ := ev["cwd"].(string); c != "" {
+				cwd = c
+			}
 		}
 		ty, _ := ev["type"].(string)
 		if ty != "user" && ty != "assistant" {
@@ -90,13 +130,21 @@ func (a *ClaudeAdapter) readSession(path, sessID, project string) (*Session, []M
 		if role == "user" && firstUser == "" && !looksLikeWrapper(text) {
 			firstUser = text
 		}
+		stored := text
+		if truncate && len(stored) > excerptMax {
+			stored = stored[:excerptMax]
+		}
 		msgs = append(msgs, Message{
-			SourceID: sessID, Idx: idx, Role: role, TS: ts, Text: text,
+			SourceID: sessID, Idx: idx, Role: role, TS: ts, Text: stored,
 		})
 		idx++
 	}
 	if len(msgs) == 0 {
 		return nil, nil, nil
+	}
+	// Prefer the cwd stamped on the events over the lossy folder-name reverse.
+	if cwd != "" {
+		project = cwd
 	}
 	title := titleFromPrompt(firstUser)
 	return &Session{
@@ -180,6 +228,8 @@ func unsanitize(s string) string {
 func looksLikeWrapper(text string) bool {
 	t := strings.TrimSpace(text)
 	return strings.HasPrefix(t, "<command-message>") ||
+		strings.HasPrefix(t, "<command-name>") ||
+		strings.HasPrefix(t, "<local-command-") ||
 		strings.HasPrefix(t, "# AGENTS.md") ||
 		strings.HasPrefix(t, "<environment_context>") ||
 		strings.HasPrefix(t, "<user_instructions>")

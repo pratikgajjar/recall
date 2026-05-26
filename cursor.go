@@ -21,6 +21,95 @@ func (a *CursorAdapter) Available() bool {
 	return err == nil
 }
 
+// Fetch returns the untruncated transcript for a single composer.
+// Faster than Scan() because it only touches the rows for this composerId.
+func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
+	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
+	db, err := sql.Open("sqlite", gpath+"?mode=ro&immutable=1")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	// composerData blob
+	var blob []byte
+	if err := db.QueryRow(`SELECT value FROM cursorDiskKV WHERE key = ?`,
+		"composerData:"+sourceID).Scan(&blob); err != nil {
+		return nil, fmt.Errorf("composerData %s: %w", sourceID, err)
+	}
+	var cb struct {
+		FullConversationHeadersOnly []struct {
+			BubbleID string `json:"bubbleId"`
+		} `json:"fullConversationHeadersOnly"`
+	}
+	if err := json.Unmarshal(blob, &cb); err != nil {
+		return nil, err
+	}
+
+	// All bubbles for this composer (uses key index, fast).
+	rows, err := db.Query(`SELECT key, value FROM cursorDiskKV
+		WHERE key >= ? AND key < ?`,
+		"bubbleId:"+sourceID+":", "bubbleId:"+sourceID+";")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type entry struct {
+		text  string
+		ttype int
+	}
+	bubbles := map[string]entry{}
+	for rows.Next() {
+		var key string
+		var v []byte
+		if err := rows.Scan(&key, &v); err != nil {
+			return nil, err
+		}
+		s := key[len("bubbleId:"):]
+		i := strings.Index(s, ":")
+		if i <= 0 {
+			continue
+		}
+		mid := s[i+1:]
+		text, ttype := extractBubbleText(v)
+		bubbles[mid] = entry{text: text, ttype: ttype}
+	}
+
+	var msgs []Message
+	seen := map[string]bool{}
+	idx := 0
+	for _, h := range cb.FullConversationHeadersOnly {
+		e, ok := bubbles[h.BubbleID]
+		if !ok || e.text == "" {
+			continue
+		}
+		seen[h.BubbleID] = true
+		msgs = append(msgs, Message{
+			SourceID: sourceID, Idx: idx, Role: bubbleRole(e.ttype), TS: 0, Text: e.text,
+		})
+		idx++
+	}
+	// Any bubbles not in headers (rare; shouldn't happen for healthy sessions)
+	for mid, e := range bubbles {
+		if seen[mid] || e.text == "" {
+			continue
+		}
+		msgs = append(msgs, Message{
+			SourceID: sourceID, Idx: idx, Role: bubbleRole(e.ttype), TS: 0, Text: e.text,
+		})
+		idx++
+	}
+	return msgs, nil
+}
+
+// OpenURL — Cursor exposes a `cursor://anysphere.cursor-deeplink/composer/<id>` deep-link
+// but the practical UI is to relaunch Cursor with the workspace folder; we return the
+// deep-link form and let the caller `open` it on macOS.
+func (a *CursorAdapter) OpenURL(sourceID string) string {
+	return "cursor://anysphere.cursor-deeplink/composer/" + sourceID
+}
+
 // Scan reads:
 //  1. Every workspaceStorage/<hash>/state.vscdb to build composerId -> workspaceFolder map.
 //  2. globalStorage/state.vscdb for composerData:* and bubbleId:* blobs.
