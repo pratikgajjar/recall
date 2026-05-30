@@ -1,0 +1,52 @@
+{
+  "name": "@pratikgajjar/pi-recall",
+  "version": "0.1.0",
+  "description": "pi extension: search your past AI chat history (Cursor, Claude Code, Codex, pi) via the recall CLI",
+  "type": "module",
+  "license": "MIT",
+  "author": "pratikgajjar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pratikgajjar/recall.git",
+    "directory": "packages/pi-recall"
+  },
+  "homepage": "https://github.com/pratikgajjar/recall/tree/main/packages/pi-recall",
+  "bugs": {
+    "url": "https://github.com/pratikgajjar/recall/issues"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "recall",
+    "ai-agent",
+    "chat-history",
+    "search",
+    "cursor",
+    "claude-code",
+    "codex"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
