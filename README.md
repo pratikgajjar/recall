@@ -8,6 +8,11 @@ and OpenAI Codex CLI — straight from their native storage. It does not move,
 copy, or modify your data. It builds a tiny searchable index over excerpts and
 metadata, and lets you grep the lot from your terminal.
 
+![recall_search running inside pi](packages/pi-recall/assets/demo.png)
+
+_Above: the [pi extension](packages/pi-recall) lets an agent call `recall_search`
+to find a past conversation and read it back — no copy-paste._
+
 ```
 $ recall doctor
 recall 0.1.0
