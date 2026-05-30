@@ -29,6 +29,30 @@ archives:
       - README.md
       - LICENSE
 
+homebrew_casks:
+  - name: recall
+    repository:
+      owner: pratikgajjar
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    binaries:
+      - recall
+    homepage: "https://github.com/pratikgajjar/recall"
+    description: "Search your AI chat history across Cursor, Claude Code, Codex, and pi"
+    license: "MIT"
+    commit_author:
+      name: goreleaser-bot
+      email: bot@goreleaser.com
+    # macOS quarantines downloaded unsigned binaries; strip it so recall runs.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/recall"]
+          end
+
 checksum:
   name_template: "checksums.txt"
 
