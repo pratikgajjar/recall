@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -46,11 +47,11 @@ func TestIngestAppendInvariants(t *testing.T) {
 	pk := "pi:sess-e2e-1"
 
 	// Full ingest.
-	s, m, next, err := ad.Scan("")
+	s, m, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.IngestBatch("pi", s, m); err != nil {
+	if err := ix.IngestBatch(context.Background(), "pi", s, m); err != nil {
 		t.Fatal(err)
 	}
 	if got := sessionMsgCount(t, ix, pk); got != 2 {
@@ -62,14 +63,14 @@ func TestIngestAppendInvariants(t *testing.T) {
 
 	// Append one message and ingest via the append path.
 	appendLines(t, path, piMsg("user", "foxtrot golf", "2026-05-03T08:10:00Z"))
-	s2, m2, _, err := ad.Scan(next)
+	s2, m2, _, err := ad.Scan(context.Background(), next)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(s2) != 1 || !s2[0].Append {
 		t.Fatalf("expected an Append session, got %+v", s2)
 	}
-	if err := ix.IngestBatch("pi", s2, m2); err != nil {
+	if err := ix.IngestBatch(context.Background(), "pi", s2, m2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,11 +108,11 @@ func TestFullReingestReplacesNotDuplicates(t *testing.T) {
 
 	// Ingest the same full session twice (e.g. a forced --full re-read).
 	for i := 0; i < 2; i++ {
-		s, m, _, err := ad.Scan("") // prev="" => always full
+		s, m, _, err := ad.Scan(context.Background(), "") // prev="" => always full
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := ix.IngestBatch("pi", s, m); err != nil {
+		if err := ix.IngestBatch(context.Background(), "pi", s, m); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -136,11 +137,11 @@ func TestSearchTitleAndProjectFilter(t *testing.T) {
 	)
 	ad := &PiAdapter{Root: root}
 	ix := newTestIndex(t)
-	s, m, _, err := ad.Scan("")
+	s, m, _, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.IngestBatch("pi", s, m); err != nil {
+	if err := ix.IngestBatch(context.Background(), "pi", s, m); err != nil {
 		t.Fatal(err)
 	}
 

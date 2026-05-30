@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -9,7 +10,7 @@ func TestScanLinesSkipsPartialTrailing(t *testing.T) {
 	// Two complete lines, then a partial (no trailing newline).
 	in := "a\nbb\nccc"
 	var got []string
-	n, err := scanLines(strings.NewReader(in), func(line []byte) error {
+	n, err := scanLines(context.Background(), strings.NewReader(in), func(line []byte) error {
 		got = append(got, string(line))
 		return nil
 	})
@@ -27,7 +28,7 @@ func TestScanLinesSkipsPartialTrailing(t *testing.T) {
 func TestScanLinesAllComplete(t *testing.T) {
 	in := "x\ny\n"
 	var count int
-	n, err := scanLines(strings.NewReader(in), func(line []byte) error {
+	n, err := scanLines(context.Background(), strings.NewReader(in), func(line []byte) error {
 		count++
 		return nil
 	})
@@ -48,9 +49,15 @@ func TestFileCkptRoundTrip(t *testing.T) {
 	if got["/a/b.jsonl"] != m["/a/b.jsonl"] {
 		t.Fatalf("round trip mismatch: %+v vs %+v", got, m)
 	}
-	// Legacy / unparseable checkpoint must degrade to empty (forces full re-read).
-	if len(parseFileCkpt(`{"/a/b.jsonl":"100:42"}`)) != 0 {
-		t.Error("legacy string checkpoint should parse as empty map")
+	// Legacy "size:mtime" checkpoints must migrate (so unchanged files still
+	// skip) — not degrade to empty, which would force a full re-ingest.
+	leg := parseFileCkpt(`{"/a/b.jsonl":"100:42"}`)
+	if leg["/a/b.jsonl"] != (fileState{Size: 100, MTime: 42}) {
+		t.Errorf("legacy checkpoint should migrate to Size/MTime, got %+v", leg)
+	}
+	// Genuinely unparseable input degrades to empty.
+	if len(parseFileCkpt(`not json`)) != 0 {
+		t.Error("garbage checkpoint should parse as empty map")
 	}
 	if len(parseFileCkpt("")) != 0 {
 		t.Error("empty checkpoint should be empty map")

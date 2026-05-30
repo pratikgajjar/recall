@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +17,7 @@ type ClaudeAdapter struct {
 func (a *ClaudeAdapter) ID() string      { return "claude" }
 func (a *ClaudeAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
-func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) {
+func (a *ClaudeAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
 
@@ -27,6 +28,9 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	var sessions []Session
 	var msgs []Message
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, "", err
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -52,7 +56,7 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 				continue
 			}
 			if ok && size > prevSt.Size && prevSt.Offset <= size {
-				if p, err := a.parse(full, prevSt.Offset, prevSt.Idx, sessID, true); err == nil && len(p.msgs) > 0 {
+				if p, err := a.parse(ctx, full, prevSt.Offset, prevSt.Idx, sessID, true); err == nil && len(p.msgs) > 0 {
 					sessions = append(sessions, Session{
 						Source: "claude", SourceID: sessID, Append: true,
 						EndedAt: p.endedAt, MsgCount: len(p.msgs),
@@ -64,7 +68,7 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 				// fall through to a full re-read on parse failure / truncation
 			}
 
-			p, err := a.parse(full, 0, 0, sessID, true)
+			p, err := a.parse(ctx, full, 0, 0, sessID, true)
 			nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
 			if err != nil || len(p.msgs) == 0 {
 				continue
@@ -85,7 +89,7 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	return sessions, msgs, encodeFileCkpt(nextMap), nil
 }
 
-func (a *ClaudeAdapter) Fetch(sourceID string) ([]Message, error) {
+func (a *ClaudeAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
 	entries, err := os.ReadDir(a.Root)
 	if err != nil {
 		return nil, err
@@ -97,7 +101,7 @@ func (a *ClaudeAdapter) Fetch(sourceID string) ([]Message, error) {
 		}
 		p := filepath.Join(a.Root, e.Name(), target)
 		if _, err := os.Stat(p); err == nil {
-			res, err := a.parse(p, 0, 0, sourceID, false)
+			res, err := a.parse(ctx, p, 0, 0, sourceID, false)
 			return res.msgs, err
 		}
 	}
@@ -116,7 +120,7 @@ type claudeParse struct {
 	nextIdx            int
 }
 
-func (a *ClaudeAdapter) parse(path string, startOffset int64, startIdx int, sessID string, truncate bool) (claudeParse, error) {
+func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int64, startIdx int, sessID string, truncate bool) (claudeParse, error) {
 	res := claudeParse{nextIdx: startIdx}
 	fh, err := os.Open(path)
 	if err != nil {
@@ -129,7 +133,7 @@ func (a *ClaudeAdapter) parse(path string, startOffset int64, startIdx int, sess
 		}
 	}
 	idx := startIdx
-	consumed, err := scanLines(fh, func(line []byte) error {
+	consumed, err := scanLines(ctx, fh, func(line []byte) error {
 		var ev ClaudeEvent
 		if JSONUnmarshal(line, &ev) != nil {
 			return nil

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -202,7 +204,7 @@ func openIndexOrFail() (*Index, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, errors.New("no index yet — run `recall index` first")
 	}
-	return openIndex(path)
+	return openIndexRead(path)
 }
 
 func runIndex(args []string) error {
@@ -212,18 +214,33 @@ func runIndex(args []string) error {
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	// First Ctrl+C cancels ctx (graceful). A second one force-exits, in case a
+	// syscall is briefly uninterruptible.
+	go func() {
+		<-ctx.Done()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt)
+		<-sig
+		fmt.Fprintln(os.Stderr, "\nforce quit")
+		os.Exit(130)
+	}()
+
 	ix, err := openIndex(defaultIndexPath())
 	if err != nil {
 		return err
 	}
 	defer ix.Close()
 
-	ix.BulkMode(true)
-	defer ix.BulkMode(false)
+	ix.BulkMode(true, *full)
 
 	start := time.Now()
 	var grand int
 	for _, ad := range defaultAdapters() {
+		if ctx.Err() != nil {
+			break
+		}
 		if !ad.Available() {
 			fmt.Printf("  %-7s skipped (not installed)\n", ad.ID())
 			continue
@@ -233,21 +250,48 @@ func runIndex(args []string) error {
 		if !*full {
 			prev = ix.GetMeta("ckpt:" + ad.ID())
 		}
-		sessions, msgs, next, err := ad.Scan(prev)
+		fmt.Printf("  %-7s scanning…", ad.ID())
+		os.Stdout.Sync()
+		sessions, msgs, next, err := ad.Scan(ctx, prev)
 		if err != nil {
-			fmt.Printf("  %-7s error: %v\n", ad.ID(), err)
+			if ctx.Err() != nil {
+				fmt.Printf("\r\033[K")
+				break
+			}
+			fmt.Printf("\r  %-7s error: %v\n", ad.ID(), err)
 			continue
 		}
-		if err := ix.IngestBatch(ad.ID(), sessions, msgs); err != nil {
-			fmt.Printf("  %-7s ingest error: %v\n", ad.ID(), err)
+		fmt.Printf("\r  %-7s ingesting %d sessions…", ad.ID(), len(sessions))
+		os.Stdout.Sync()
+		if err := ix.IngestBatch(ctx, ad.ID(), sessions, msgs); err != nil {
+			if ctx.Err() != nil {
+				fmt.Printf("\r\033[K")
+				break
+			}
+			fmt.Printf("\r  %-7s ingest error: %v\n", ad.ID(), err)
 			continue
 		}
 		if next != "" {
 			_ = ix.SetMeta("ckpt:"+ad.ID(), next)
 		}
 		grand += len(sessions)
-		fmt.Printf("  %-7s %6d sessions  %7d messages  %s\n",
+		fmt.Printf("\r\033[K  %-7s %6d sessions  %7d messages  %s\n",
 			ad.ID(), len(sessions), len(msgs), time.Since(t0).Round(time.Millisecond))
+	}
+	if ctx.Err() != nil {
+		ix.BulkMode(false, false)
+		fmt.Printf("interrupted — indexed %d sessions in %s (checkpoints saved, safe to resume)\n",
+			grand, time.Since(start).Round(time.Millisecond))
+		return nil
+	}
+
+	if *full {
+		fmt.Printf("  optimizing FTS index…")
+		os.Stdout.Sync()
+	}
+	ix.BulkMode(false, *full)
+	if *full {
+		fmt.Printf("\r\033[K")
 	}
 	_ = ix.SetMeta("indexed_at", time.Now().Format(time.RFC3339))
 	fmt.Printf("indexed %d sessions in %s → %s\n",
@@ -274,7 +318,7 @@ func runDoctor(_ []string) error {
 		return nil
 	}
 	st, _ := os.Stat(idxPath)
-	ix, err := openIndex(idxPath)
+	ix, err := openIndexRead(idxPath)
 	if err != nil {
 		return err
 	}
@@ -431,7 +475,7 @@ func runLast(args []string) error {
 	if len(hits) == 0 {
 		return fmt.Errorf("no sessions found for %s", opts.Project)
 	}
-	return printTranscript(ix, hits[0].SessionID, cf.json)
+	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json)
 }
 
 func runShow(args []string) error {
@@ -448,10 +492,10 @@ func runShow(args []string) error {
 		return err
 	}
 	defer ix.Close()
-	return printTranscript(ix, fs.Arg(0), *asJSON)
+	return printTranscript(context.Background(), ix, fs.Arg(0), *asJSON)
 }
 
-func printTranscript(ix *Index, id string, asJSON bool) error {
+func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool) error {
 	s, err := ix.LookupSession(id)
 	if err != nil {
 		return fmt.Errorf("session %s: %w", id, err)
@@ -461,7 +505,7 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 	if ad == nil {
 		return fmt.Errorf("no adapter for source %q", s.Source)
 	}
-	msgs, err := ad.Fetch(s.SourceID)
+	msgs, err := ad.Fetch(ctx, s.SourceID)
 	if err != nil {
 		return err
 	}

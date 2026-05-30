@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,7 @@ func TestPiScanFull(t *testing.T) {
 	if !ad.Available() {
 		t.Fatal("adapter should be available")
 	}
-	sessions, msgs, _, err := ad.Scan("")
+	sessions, msgs, _, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +64,13 @@ func TestPiAppendIncremental(t *testing.T) {
 		piMsg("assistant", "first answer", "2026-05-03T08:00:06Z"),
 	)
 	ad := &PiAdapter{Root: root}
-	_, _, next, err := ad.Scan("")
+	_, _, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	appendLines(t, path, piMsg("user", "second question", "2026-05-03T08:10:00Z"))
-	sessions, msgs, next2, err := ad.Scan(next)
+	sessions, msgs, next2, err := ad.Scan(context.Background(), next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestPiAppendIncremental(t *testing.T) {
 	// (The scan falls back to a full re-read here, but the partial content is
 	// left for next time — it must not leak into any indexed message.)
 	appendRaw(t, path, `{"type":"message","timestamp":"2026-05-03T08:20:00Z","message":{"role":"assistant","content":"partial`)
-	_, m3, next3, err := ad.Scan(next2)
+	_, m3, next3, err := ad.Scan(context.Background(), next2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestPiAppendIncremental(t *testing.T) {
 
 	// Complete the line — now it is consumed exactly once, continuing the idx.
 	appendRaw(t, path, ` answer"}}`+"\n")
-	_, m4, _, err := ad.Scan(next3)
+	_, m4, _, err := ad.Scan(context.Background(), next3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestPiFetch(t *testing.T) {
 		piMsg("user", "hello there", "2026-05-03T08:00:02Z"),
 	)
 	ad := &PiAdapter{Root: root}
-	msgs, err := ad.Fetch("sess-pi-3")
+	msgs, err := ad.Fetch(context.Background(), "sess-pi-3")
 	if err != nil {
 		t.Fatal(err)
 	}

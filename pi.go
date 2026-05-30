@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,13 +17,16 @@ type PiAdapter struct {
 func (a *PiAdapter) ID() string      { return "pi" }
 func (a *PiAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
-func (a *PiAdapter) Scan(prev string) ([]Session, []Message, string, error) {
+func (a *PiAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
 
 	var sessions []Session
 	var msgs []Message
 	err := filepath.WalkDir(a.Root, func(path string, d fs.DirEntry, err error) error {
+		if cErr := ctx.Err(); cErr != nil {
+			return cErr
+		}
 		if err != nil || d.IsDir() {
 			return nil
 		}
@@ -41,7 +45,7 @@ func (a *PiAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 			return nil
 		}
 		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
-			if p, e := a.parse(path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
+			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
 				sessions = append(sessions, Session{
 					Source: "pi", SourceID: prevSt.SID, Append: true,
 					EndedAt: p.endedAt, MsgCount: len(p.msgs),
@@ -52,7 +56,7 @@ func (a *PiAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 			}
 		}
 
-		p, e := a.parse(path, 0, 0, "", true)
+		p, e := a.parse(ctx, path, 0, 0, "", true)
 		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
 			return nil
@@ -69,7 +73,7 @@ func (a *PiAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 	return sessions, msgs, encodeFileCkpt(nextMap), err
 }
 
-func (a *PiAdapter) Fetch(sourceID string) ([]Message, error) {
+func (a *PiAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
 	suffix := "_" + sourceID + ".jsonl"
 	var found string
 	_ = filepath.WalkDir(a.Root, func(path string, d fs.DirEntry, err error) error {
@@ -85,7 +89,7 @@ func (a *PiAdapter) Fetch(sourceID string) ([]Message, error) {
 	if found == "" {
 		return nil, fmt.Errorf("pi session %s not found", sourceID)
 	}
-	res, err := a.parse(found, 0, 0, sourceID, false)
+	res, err := a.parse(ctx, found, 0, 0, sourceID, false)
 	return res.msgs, err
 }
 
@@ -114,7 +118,7 @@ type piParse struct {
 	nextIdx            int
 }
 
-func (a *PiAdapter) parse(path string, startOffset int64, startIdx int, knownSID string, truncate bool) (piParse, error) {
+func (a *PiAdapter) parse(ctx context.Context, path string, startOffset int64, startIdx int, knownSID string, truncate bool) (piParse, error) {
 	res := piParse{sessID: knownSID, nextIdx: startIdx}
 	fh, err := os.Open(path)
 	if err != nil {
@@ -127,7 +131,7 @@ func (a *PiAdapter) parse(path string, startOffset int64, startIdx int, knownSID
 		}
 	}
 	idx := startIdx
-	consumed, err := scanLines(fh, func(line []byte) error {
+	consumed, err := scanLines(ctx, fh, func(line []byte) error {
 		var ev PiEvent
 		if JSONUnmarshal(line, &ev) != nil {
 			return nil

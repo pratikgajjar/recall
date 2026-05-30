@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -20,7 +21,7 @@ func (a *CursorAdapter) Available() bool {
 	return err == nil
 }
 
-func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
+func (a *CursorAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
 	db, err := sql.Open("sqlite", gpath+"?mode=ro&immutable=1")
 	if err != nil {
@@ -29,7 +30,7 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 	defer db.Close()
 
 	var blob []byte
-	if err := db.QueryRow(`SELECT value FROM cursorDiskKV WHERE key = ?`,
+	if err := db.QueryRowContext(ctx, `SELECT value FROM cursorDiskKV WHERE key = ?`,
 		"composerData:"+sourceID).Scan(&blob); err != nil {
 		return nil, fmt.Errorf("composerData %s: %w", sourceID, err)
 	}
@@ -42,7 +43,7 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query(`SELECT key, value FROM cursorDiskKV
+	rows, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV
 		WHERE key >= ? AND key < ?`,
 		"bubbleId:"+sourceID+":", "bubbleId:"+sourceID+";")
 	if err != nil {
@@ -102,7 +103,7 @@ func (a *CursorAdapter) OpenURL(sourceID string) string {
 	return "cursor://anysphere.cursor-deeplink/composer/" + sourceID
 }
 
-func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) {
+func (a *CursorAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
 	prevRowID := parseCursorCkpt(prev)
 
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
@@ -114,7 +115,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 
 	touched := map[string]bool{}
 	if prevRowID > 0 {
-		ids, _, err := a.collectTouchedComposers(db, prevRowID)
+		ids, _, err := a.collectTouchedComposers(ctx, db, prevRowID)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -123,12 +124,12 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 		}
 
 		if len(touched) == 0 {
-			next, _ := a.currentMaxRowID(db)
+			next, _ := a.currentMaxRowID(ctx, db)
 			return nil, nil, encodeCursorCkpt(next), nil
 		}
 	}
 
-	cidToProject, err := a.mapComposersToProjects()
+	cidToProject, err := a.mapComposersToProjects(ctx)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("workspace scan: %w", err)
 	}
@@ -143,12 +144,12 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 			args = append(args, "composerData:"+id)
 		}
 		q := `SELECT key, value FROM cursorDiskKV WHERE key IN (` + strings.Join(ids, ",") + `)`
-		rows, err = db.Query(q, args...)
+		rows, err = db.QueryContext(ctx, q, args...)
 	} else if prevRowID == 0 {
-		rows, err = db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
+		rows, err = db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
 	} else {
 
-		next, _ := a.currentMaxRowID(db)
+		next, _ := a.currentMaxRowID(ctx, db)
 		return nil, nil, encodeCursorCkpt(next), nil
 	}
 	if err != nil {
@@ -200,20 +201,20 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	if prevRowID > 0 && len(touched) > 0 {
 
 		for cid := range touched {
-			rs, err := db.Query(`SELECT key, value FROM cursorDiskKV
+			rs, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV
 				WHERE key >= ? AND key < ?`,
 				"bubbleId:"+cid+":", "bubbleId:"+cid+";")
 			if err != nil {
 				return nil, nil, "", err
 			}
-			collectBubbles(rs, bubblesByComp)
+			collectBubbles(ctx, rs, bubblesByComp)
 		}
 	} else {
-		br, err = db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'`)
+		br, err = db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'`)
 		if err != nil {
 			return nil, nil, "", err
 		}
-		collectBubbles(br, bubblesByComp)
+		collectBubbles(ctx, br, bubblesByComp)
 	}
 
 	var sessions []Session
@@ -272,7 +273,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].StartedAt < sessions[j].StartedAt
 	})
-	nextRowID, _ := a.currentMaxRowID(db)
+	nextRowID, _ := a.currentMaxRowID(ctx, db)
 	return sessions, msgs, encodeCursorCkpt(nextRowID), nil
 }
 
@@ -283,9 +284,14 @@ type bubbleRow struct {
 	ttype      int
 }
 
-func collectBubbles(rs *sql.Rows, into map[string][]bubbleRow) {
+func collectBubbles(ctx context.Context, rs *sql.Rows, into map[string][]bubbleRow) {
 	defer rs.Close()
+	n := 0
 	for rs.Next() {
+		if n&4095 == 0 && ctx.Err() != nil {
+			return
+		}
+		n++
 		var key string
 		var val []byte
 		if err := rs.Scan(&key, &val); err != nil {
@@ -306,9 +312,9 @@ func collectBubbles(rs *sql.Rows, into map[string][]bubbleRow) {
 	}
 }
 
-func (a *CursorAdapter) collectTouchedComposers(db *sql.DB, prevRowID int64) ([]string, int64, error) {
+func (a *CursorAdapter) collectTouchedComposers(ctx context.Context, db *sql.DB, prevRowID int64) ([]string, int64, error) {
 	seen := map[string]bool{}
-	rows, err := db.Query(`SELECT key FROM cursorDiskKV
+	rows, err := db.QueryContext(ctx, `SELECT key FROM cursorDiskKV
 		WHERE rowid > ? AND (key LIKE 'composerData:%' OR key LIKE 'bubbleId:%')`, prevRowID)
 	if err != nil {
 		return nil, 0, err
@@ -333,13 +339,13 @@ func (a *CursorAdapter) collectTouchedComposers(db *sql.DB, prevRowID int64) ([]
 	for k := range seen {
 		out = append(out, k)
 	}
-	maxR, err := a.currentMaxRowID(db)
+	maxR, err := a.currentMaxRowID(ctx, db)
 	return out, maxR, err
 }
 
-func (a *CursorAdapter) currentMaxRowID(db *sql.DB) (int64, error) {
+func (a *CursorAdapter) currentMaxRowID(ctx context.Context, db *sql.DB) (int64, error) {
 	var n sql.NullInt64
-	if err := db.QueryRow(`SELECT MAX(rowid) FROM cursorDiskKV`).Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT MAX(rowid) FROM cursorDiskKV`).Scan(&n); err != nil {
 		return 0, err
 	}
 	if !n.Valid {
@@ -422,7 +428,7 @@ func plainFromRichText(s string) string {
 	return sb.String()
 }
 
-func (a *CursorAdapter) mapComposersToProjects() (map[string]string, error) {
+func (a *CursorAdapter) mapComposersToProjects(ctx context.Context) (map[string]string, error) {
 	out := map[string]string{}
 	wsRoot := filepath.Join(a.UserDir, "workspaceStorage")
 	entries, err := os.ReadDir(wsRoot)
@@ -430,6 +436,9 @@ func (a *CursorAdapter) mapComposersToProjects() (map[string]string, error) {
 		return out, err
 	}
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -443,7 +452,7 @@ func (a *CursorAdapter) mapComposersToProjects() (map[string]string, error) {
 		if err != nil {
 			continue
 		}
-		row := db.QueryRow(`SELECT value FROM ItemTable WHERE key = 'composer.composerData'`)
+		row := db.QueryRowContext(ctx, `SELECT value FROM ItemTable WHERE key = 'composer.composerData'`)
 		var blob []byte
 		if err := row.Scan(&blob); err == nil {
 			var data struct {

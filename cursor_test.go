@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 )
 
@@ -19,7 +20,7 @@ func TestCursorScanFullAndFetch(t *testing.T) {
 	if !ad.Available() {
 		t.Fatal("adapter should be available")
 	}
-	sessions, msgs, next, err := ad.Scan("")
+	sessions, msgs, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,7 @@ func TestCursorScanFullAndFetch(t *testing.T) {
 		t.Error("expected checkpoint")
 	}
 
-	full, err := ad.Fetch("c1")
+	full, err := ad.Fetch(context.Background(), "c1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,13 +59,13 @@ func TestCursorIncrementalByRowID(t *testing.T) {
 	addCursorWorkspace(t, userDir, "ws1", "/work/acme-api", "c1", "c2")
 	ad := &CursorAdapter{UserDir: userDir}
 
-	_, _, next, err := ad.Scan("")
+	_, _, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// no-op
-	s0, _, next0, err := ad.Scan(next)
+	s0, _, next0, err := ad.Scan(context.Background(), next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestCursorIncrementalByRowID(t *testing.T) {
 		id: "c2", createdAt: 1700000100000,
 		bubbles: []tBubble{{id: "b9", typ: 1, text: "second chat"}},
 	})
-	sessions, _, _, err := ad.Scan(next0)
+	sessions, _, _, err := ad.Scan(context.Background(), next0)
 	if err != nil {
 		t.Fatal(err)
 	}

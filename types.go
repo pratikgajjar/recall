@@ -1,5 +1,7 @@
 package main
 
+import "context"
+
 type Session struct {
 	Source    string         `json:"source"`
 	SourceID  string         `json:"source_id"`
@@ -28,9 +30,9 @@ type Adapter interface {
 	ID() string
 	Available() bool
 
-	Scan(prev string) (sessions []Session, msgs []Message, next string, err error)
+	Scan(ctx context.Context, prev string) (sessions []Session, msgs []Message, next string, err error)
 
-	Fetch(sourceID string) ([]Message, error)
+	Fetch(ctx context.Context, sourceID string) ([]Message, error)
 
 	OpenURL(sourceID string) string
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -36,7 +37,7 @@ func TestCodexScanFull(t *testing.T) {
 	if !ad.Available() {
 		t.Fatal("adapter should be available")
 	}
-	sessions, msgs, next, err := ad.Scan("")
+	sessions, msgs, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +74,13 @@ func TestCodexAppendIncremental(t *testing.T) {
 		codexMsg("user", "kick things off", "2026-05-02T09:00:03Z"),
 	)
 	ad := &CodexAdapter{Root: root}
-	_, _, next, err := ad.Scan("")
+	_, _, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	appendLines(t, path, codexMsg("assistant", "done deal", "2026-05-02T09:05:00Z"))
-	sessions, msgs, _, err := ad.Scan(next)
+	sessions, msgs, _, err := ad.Scan(context.Background(), next)
 	if err != nil {
 		t.Fatal(err)
 	}

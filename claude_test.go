@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -27,7 +28,7 @@ func TestClaudeScanFull(t *testing.T) {
 	if !ad.Available() {
 		t.Fatal("adapter should be available")
 	}
-	sessions, msgs, next, err := ad.Scan("")
+	sessions, msgs, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,13 +69,13 @@ func TestClaudeAppendIncremental(t *testing.T) {
 	)
 	ad := &ClaudeAdapter{Root: root}
 
-	_, _, next, err := ad.Scan("")
+	_, _, next, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// no-op: nothing changed
-	s0, _, next0, err := ad.Scan(next)
+	s0, _, next0, err := ad.Scan(context.Background(), next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestClaudeAppendIncremental(t *testing.T) {
 
 	// append one new message
 	appendLines(t, path, claudeUser("now run the tests", "2026-05-01T10:01:00Z", "/work/acme-api"))
-	sessions, msgs, _, err := ad.Scan(next0)
+	sessions, msgs, _, err := ad.Scan(context.Background(), next0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestClaudeFetchUntruncated(t *testing.T) {
 	ad := &ClaudeAdapter{Root: root}
 
 	// Scan stores a truncated excerpt.
-	_, msgs, _, err := ad.Scan("")
+	_, msgs, _, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func TestClaudeFetchUntruncated(t *testing.T) {
 		t.Errorf("indexed excerpt len = %d, want %d", got, excerptMax)
 	}
 	// Fetch returns the full untruncated message.
-	full, err := ad.Fetch("sess-claude-3")
+	full, err := ad.Fetch(context.Background(), "sess-claude-3")
 	if err != nil {
 		t.Fatal(err)
 	}

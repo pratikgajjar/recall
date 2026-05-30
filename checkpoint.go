@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"io"
+	"strconv"
+	"strings"
 )
 
 type fileState struct {
@@ -18,8 +21,27 @@ func parseFileCkpt(s string) map[string]fileState {
 		return map[string]fileState{}
 	}
 	var m map[string]fileState
-	if err := JSONUnmarshal([]byte(s), &m); err != nil {
+	if err := JSONUnmarshal([]byte(s), &m); err == nil {
+		return m
+	}
+	// Legacy format was map[path]"size:mtime". Migrate it so unchanged files
+	// still skip; Offset/Idx/SID are unknown, so the first change re-parses in
+	// full (then re-saves in the new format).
+	var legacy map[string]string
+	if err := JSONUnmarshal([]byte(s), &legacy); err != nil {
 		return map[string]fileState{}
+	}
+	m = make(map[string]fileState, len(legacy))
+	for path, tok := range legacy {
+		size, mtime, ok := strings.Cut(tok, ":")
+		if !ok {
+			continue
+		}
+		sz, err1 := strconv.ParseInt(size, 10, 64)
+		mt, err2 := strconv.ParseInt(mtime, 10, 64)
+		if err1 == nil && err2 == nil {
+			m[path] = fileState{Size: sz, MTime: mt}
+		}
 	}
 	return m
 }
@@ -29,10 +51,17 @@ func encodeFileCkpt(m map[string]fileState) string {
 	return string(b)
 }
 
-func scanLines(r io.Reader, fn func(line []byte) error) (int64, error) {
+func scanLines(ctx context.Context, r io.Reader, fn func(line []byte) error) (int64, error) {
 	br := bufio.NewReaderSize(r, 1<<20)
 	var consumed int64
+	var n int
 	for {
+		if n&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return consumed, err
+			}
+		}
+		n++
 		line, err := br.ReadBytes('\n')
 		if err == nil {
 			consumed += int64(len(line))

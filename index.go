@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -16,17 +17,57 @@ type Index struct {
 	db *sql.DB
 }
 
+const (
+	sqliteMmapBytes   = 256 << 20 // memory-map the index so FTS reads hit page cache
+	sqliteCacheKiB    = 64 << 10  // page cache; negative cache_size means KiB
+	sqliteBusyTimeout = 10_000    // ms; safety net — WAL means it should never fire
+)
+
+// indexDSN builds the modernc.org/sqlite connection string. Readers and the
+// writer share the tuning pragmas but differ where it matters: the writer keeps
+// WAL and grabs its lock up front (_txlock=immediate); readers are query_only so
+// a search can never take a write lock — under WAL it never blocks the writer.
+func indexDSN(path string, readOnly bool) string {
+	pragmas := []string{
+		"synchronous(NORMAL)",
+		"temp_store(MEMORY)",
+		fmt.Sprintf("cache_size(-%d)", sqliteCacheKiB),
+		fmt.Sprintf("mmap_size(%d)", sqliteMmapBytes),
+		fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeout),
+	}
+	var params []string
+	if readOnly {
+		pragmas = append(pragmas, "query_only(1)")
+	} else {
+		params = append(params, "_txlock=immediate")
+		pragmas = append(pragmas, "journal_mode(WAL)")
+	}
+	for _, p := range pragmas {
+		params = append(params, "_pragma="+p)
+	}
+	return path + "?" + strings.Join(params, "&")
+}
+
 func openIndex(path string) (*Index, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-65536)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", indexDSN(path, false))
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 	if err := bootstrap(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("bootstrap: %w", err)
+	}
+	return &Index{db: db}, nil
+}
+
+func openIndexRead(path string) (*Index, error) {
+	db, err := sql.Open("sqlite", indexDSN(path, true))
+	if err != nil {
+		return nil, err
 	}
 	return &Index{db: db}, nil
 }
@@ -81,8 +122,8 @@ func firstLine(s string) string {
 	return s
 }
 
-func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) error {
-	tx, err := ix.db.Begin()
+func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Session, msgs []Message) error {
+	tx, err := ix.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -141,11 +182,19 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 	}
 
 	for _, s := range sessions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		pk := source + ":" + s.SourceID
 
 		if s.Append {
 			added := 0
-			for _, m := range bySession[s.SourceID] {
+			for i, m := range bySession[s.SourceID] {
+				if i&4095 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
 				text := trimText(m.Text)
 				if text == "" {
 					continue
@@ -177,7 +226,12 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 		if _, err := insSessFTS.Exec(pk, s.Title, s.Project); err != nil {
 			return fmt.Errorf("insert session_fts %s: %w", pk, err)
 		}
-		for _, m := range bySession[s.SourceID] {
+		for i, m := range bySession[s.SourceID] {
+			if i&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			text := trimText(m.Text)
 			if text == "" {
 				continue
@@ -198,22 +252,34 @@ func trimText(s string) string {
 	return s
 }
 
-func (ix *Index) BulkMode(on bool) {
+// BulkMode wraps a batch ingest with write-tuning pragmas. `full` distinguishes
+// a from-scratch rebuild from a cheap incremental refresh:
+//   - full: disable FTS automerge during insert, then run a one-shot `optimize`
+//     (rewrites the whole FTS index — O(index size), only acceptable once).
+//   - incremental: leave automerge on so new rows merge cheaply, and NEVER
+//     optimize — that was rewriting the entire ~200MB index on every run.
+func (ix *Index) BulkMode(on, full bool) {
 	if on {
 		_, _ = ix.db.Exec(`PRAGMA synchronous=OFF`)
-		_, _ = ix.db.Exec(`PRAGMA journal_mode=MEMORY`)
 		_, _ = ix.db.Exec(`PRAGMA cache_size=-262144`)
-
-		_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts, rank) VALUES('automerge', 0)`)
-		_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts, rank) VALUES('automerge', 0)`)
+		if full {
+			_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts, rank) VALUES('automerge', 0)`)
+			_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts, rank) VALUES('automerge', 0)`)
+		}
 		return
 	}
 
-	_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
-	_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts) VALUES('optimize')`)
+	if full {
+		_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
+		_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts) VALUES('optimize')`)
+	}
 	_, _ = ix.db.Exec(`PRAGMA synchronous=NORMAL`)
-	_, _ = ix.db.Exec(`PRAGMA journal_mode=WAL`)
 	_, _ = ix.db.Exec(`PRAGMA cache_size=-65536`)
+	if full {
+		_, _ = ix.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	} else {
+		_, _ = ix.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`)
+	}
 }
 
 func (ix *Index) SetMeta(k, v string) error {
