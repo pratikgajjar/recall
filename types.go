@@ -9,6 +9,11 @@ type Session struct {
 	EndedAt   int64          `json:"ended_at_ms"`
 	MsgCount  int            `json:"msg_count"`
 	Meta      map[string]any `json:"meta,omitempty"`
+
+	// Append marks an incremental update for an already-indexed session:
+	// only the new messages are carried, and ingest appends them to FTS
+	// instead of replacing the session's rows. EndedAt/MsgCount are deltas.
+	Append bool `json:"-"`
 }
 
 type Message struct {

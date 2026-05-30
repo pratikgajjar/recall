@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +18,7 @@ func (a *ClaudeAdapter) Available() bool { _, err := os.Stat(a.Root); return err
 
 func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 	prevMap := parseFileCkpt(prev)
-	nextMap := map[string]string{}
+	nextMap := map[string]fileState{}
 
 	entries, err := os.ReadDir(a.Root)
 	if err != nil {
@@ -43,20 +43,43 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 			if err != nil {
 				continue
 			}
-			tok := fileTok(st)
-			nextMap[full] = tok
-			if prevMap[full] == tok {
-				continue
-			}
 			sessID := strings.TrimSuffix(name, ".jsonl")
-			s, mm, err := a.readSession(full, sessID, project)
-			if err != nil {
+			size, mtime := st.Size(), st.ModTime().UnixNano()
+			prevSt, ok := prevMap[full]
+
+			if ok && prevSt.Size == size && prevSt.MTime == mtime {
+				nextMap[full] = prevSt
 				continue
 			}
-			if s != nil {
-				sessions = append(sessions, *s)
-				msgs = append(msgs, mm...)
+			if ok && size > prevSt.Size && prevSt.Offset <= size {
+				if p, err := a.parse(full, prevSt.Offset, prevSt.Idx, sessID, true); err == nil && len(p.msgs) > 0 {
+					sessions = append(sessions, Session{
+						Source: "claude", SourceID: sessID, Append: true,
+						EndedAt: p.endedAt, MsgCount: len(p.msgs),
+					})
+					msgs = append(msgs, p.msgs...)
+					nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
+					continue
+				}
+				// fall through to a full re-read on parse failure / truncation
 			}
+
+			p, err := a.parse(full, 0, 0, sessID, true)
+			nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
+			if err != nil || len(p.msgs) == 0 {
+				continue
+			}
+			proj := project
+			if p.cwd != "" {
+				proj = p.cwd
+			}
+			sessions = append(sessions, Session{
+				Source: "claude", SourceID: sessID,
+				Project: proj, Title: titleFromPrompt(p.firstUser),
+				StartedAt: p.startedAt, EndedAt: p.endedAt,
+				MsgCount: len(p.msgs),
+			})
+			msgs = append(msgs, p.msgs...)
 		}
 	}
 	return sessions, msgs, encodeFileCkpt(nextMap), nil
@@ -74,8 +97,8 @@ func (a *ClaudeAdapter) Fetch(sourceID string) ([]Message, error) {
 		}
 		p := filepath.Join(a.Root, e.Name(), target)
 		if _, err := os.Stat(p); err == nil {
-			_, msgs, err := a.readSessionFull(p, sourceID)
-			return msgs, err
+			res, err := a.parse(p, 0, 0, sourceID, false)
+			return res.msgs, err
 		}
 	}
 	return nil, fmt.Errorf("claude session %s not found", sourceID)
@@ -85,79 +108,64 @@ func (a *ClaudeAdapter) OpenURL(sourceID string) string {
 	return "claude --resume " + sourceID
 }
 
-func (a *ClaudeAdapter) readSessionFull(path, sessID string) (*Session, []Message, error) {
-	return a.readSessionImpl(path, sessID, "", false)
+type claudeParse struct {
+	msgs               []Message
+	startedAt, endedAt int64
+	firstUser, cwd     string
+	endOffset          int64
+	nextIdx            int
 }
 
-func (a *ClaudeAdapter) readSession(path, sessID, project string) (*Session, []Message, error) {
-	return a.readSessionImpl(path, sessID, project, true)
-}
-
-func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate bool) (*Session, []Message, error) {
+func (a *ClaudeAdapter) parse(path string, startOffset int64, startIdx int, sessID string, truncate bool) (claudeParse, error) {
+	res := claudeParse{nextIdx: startIdx}
 	fh, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return res, err
 	}
 	defer fh.Close()
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 1<<16), 16<<20)
-
-	var msgs []Message
-	idx := 0
-	var startedAt, endedAt int64
-	var firstUser string
-	var cwd string
-
-	for sc.Scan() {
-		var ev ClaudeEvent
-		if err := JSONUnmarshal(sc.Bytes(), &ev); err != nil {
-			continue
+	if startOffset > 0 {
+		if _, err := fh.Seek(startOffset, io.SeekStart); err != nil {
+			return res, err
 		}
-		if cwd == "" && ev.CWD != "" {
-			cwd = ev.CWD
+	}
+	idx := startIdx
+	consumed, err := scanLines(fh, func(line []byte) error {
+		var ev ClaudeEvent
+		if JSONUnmarshal(line, &ev) != nil {
+			return nil
+		}
+		if res.cwd == "" && ev.CWD != "" {
+			res.cwd = ev.CWD
 		}
 		if ev.Type != "user" && ev.Type != "assistant" {
-			continue
+			return nil
 		}
 		ts := parseClaudeTime(ev.Timestamp)
 		if ts > 0 {
-			if startedAt == 0 || ts < startedAt {
-				startedAt = ts
+			if res.startedAt == 0 || ts < res.startedAt {
+				res.startedAt = ts
 			}
-			if ts > endedAt {
-				endedAt = ts
+			if ts > res.endedAt {
+				res.endedAt = ts
 			}
 		}
 		text := ev.Message.Text()
 		if text == "" {
-			continue
+			return nil
 		}
-		if ev.Type == "user" && firstUser == "" && !looksLikeWrapper(text) {
-			firstUser = text
+		if ev.Type == "user" && res.firstUser == "" && !looksLikeWrapper(text) {
+			res.firstUser = text
 		}
-		stored := text
-		if truncate && len(stored) > excerptMax {
-			stored = stored[:excerptMax]
+		if truncate && len(text) > excerptMax {
+			text = text[:excerptMax]
 		}
-		msgs = append(msgs, Message{
-			SourceID: sessID, Idx: idx, Role: ev.Type, TS: ts, Text: stored,
-		})
+		res.msgs = append(res.msgs, Message{SourceID: sessID, Idx: idx, Role: ev.Type, TS: ts, Text: text})
 		idx++
-	}
-	if len(msgs) == 0 {
-		return nil, nil, nil
-	}
-
-	if cwd != "" {
-		project = cwd
-	}
-	title := titleFromPrompt(firstUser)
-	return &Session{
-		Source: "claude", SourceID: sessID,
-		Project: project, Title: title,
-		StartedAt: startedAt, EndedAt: endedAt,
-		MsgCount: len(msgs),
-	}, msgs, nil
+		return nil
+	})
+	res.endOffset = startOffset + consumed
+	res.nextIdx = idx
+	return res, err
 }
 
 type ClaudeEvent struct {

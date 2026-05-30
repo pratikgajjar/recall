@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,7 +18,7 @@ func (a *PiAdapter) Available() bool { _, err := os.Stat(a.Root); return err == 
 
 func (a *PiAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 	prevMap := parseFileCkpt(prev)
-	nextMap := map[string]string{}
+	nextMap := map[string]fileState{}
 
 	var sessions []Session
 	var msgs []Message
@@ -33,17 +33,37 @@ func (a *PiAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 		if sErr != nil {
 			return nil
 		}
-		tok := fileTok(st)
-		nextMap[path] = tok
-		if prevMap[path] == tok {
+		size, mtime := st.Size(), st.ModTime().UnixNano()
+		prevSt, ok := prevMap[path]
+
+		if ok && prevSt.Size == size && prevSt.MTime == mtime {
+			nextMap[path] = prevSt
 			return nil
 		}
-		s, mm, e := a.readSession(path, true)
-		if e != nil || s == nil {
+		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
+			if p, e := a.parse(path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
+				sessions = append(sessions, Session{
+					Source: "pi", SourceID: prevSt.SID, Append: true,
+					EndedAt: p.endedAt, MsgCount: len(p.msgs),
+				})
+				msgs = append(msgs, p.msgs...)
+				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
+				return nil
+			}
+		}
+
+		p, e := a.parse(path, 0, 0, "", true)
+		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
+		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
 			return nil
 		}
-		sessions = append(sessions, *s)
-		msgs = append(msgs, mm...)
+		sessions = append(sessions, Session{
+			Source: "pi", SourceID: p.sessID,
+			Project: p.project, Title: titleFromPrompt(p.firstUser),
+			StartedAt: p.startedAt, EndedAt: p.endedAt,
+			MsgCount: len(p.msgs),
+		})
+		msgs = append(msgs, p.msgs...)
 		return nil
 	})
 	return sessions, msgs, encodeFileCkpt(nextMap), err
@@ -65,8 +85,8 @@ func (a *PiAdapter) Fetch(sourceID string) ([]Message, error) {
 	if found == "" {
 		return nil, fmt.Errorf("pi session %s not found", sourceID)
 	}
-	_, msgs, err := a.readSession(found, false)
-	return msgs, err
+	res, err := a.parse(found, 0, 0, sourceID, false)
+	return res.msgs, err
 }
 
 func (a *PiAdapter) OpenURL(sourceID string) string {
@@ -85,69 +105,73 @@ func (a *PiAdapter) OpenURL(sourceID string) string {
 	return found
 }
 
-func (a *PiAdapter) readSession(path string, truncate bool) (*Session, []Message, error) {
+type piParse struct {
+	sessID, project    string
+	startedAt, endedAt int64
+	firstUser          string
+	msgs               []Message
+	endOffset          int64
+	nextIdx            int
+}
+
+func (a *PiAdapter) parse(path string, startOffset int64, startIdx int, knownSID string, truncate bool) (piParse, error) {
+	res := piParse{sessID: knownSID, nextIdx: startIdx}
 	fh, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return res, err
 	}
 	defer fh.Close()
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 1<<16), 16<<20)
-
-	var sessID, project string
-	var startedAt, endedAt int64
-	var firstUser string
-	var msgs []Message
-	idx := 0
-
-	for sc.Scan() {
+	if startOffset > 0 {
+		if _, err := fh.Seek(startOffset, io.SeekStart); err != nil {
+			return res, err
+		}
+	}
+	idx := startIdx
+	consumed, err := scanLines(fh, func(line []byte) error {
 		var ev PiEvent
-		if err := JSONUnmarshal(sc.Bytes(), &ev); err != nil {
-			continue
+		if JSONUnmarshal(line, &ev) != nil {
+			return nil
 		}
 		ts := parseClaudeTime(ev.Timestamp)
 		switch ev.Type {
 		case "session":
 			if ev.ID != "" {
-				sessID = ev.ID
+				res.sessID = ev.ID
 			}
 			if ev.CWD != "" {
-				project = ev.CWD
+				res.project = ev.CWD
 			}
-			startedAt = ts
+			res.startedAt = ts
 		case "message":
 			text := ev.Message.Text()
 			if text == "" {
-				continue
+				return nil
 			}
-			if ts > endedAt {
-				endedAt = ts
+			if ts > res.endedAt {
+				res.endedAt = ts
 			}
-			if startedAt == 0 || (ts > 0 && ts < startedAt) {
-				startedAt = ts
+			if res.startedAt == 0 || (ts > 0 && ts < res.startedAt) {
+				res.startedAt = ts
 			}
-			if ev.Message.Role == "user" && firstUser == "" && !looksLikeWrapper(text) {
-				firstUser = text
+			if ev.Message.Role == "user" && res.firstUser == "" && !looksLikeWrapper(text) {
+				res.firstUser = text
 			}
-			stored := text
-			if truncate && len(stored) > excerptMax {
-				stored = stored[:excerptMax]
+			if truncate && len(text) > excerptMax {
+				text = text[:excerptMax]
 			}
-			msgs = append(msgs, Message{
-				SourceID: sessID, Idx: idx, Role: ev.Message.Role, TS: ts, Text: stored,
-			})
+			res.msgs = append(res.msgs, Message{SourceID: res.sessID, Idx: idx, Role: ev.Message.Role, TS: ts, Text: text})
 			idx++
 		}
+		return nil
+	})
+	res.endOffset = startOffset + consumed
+	res.nextIdx = idx
+	for i := range res.msgs {
+		if res.msgs[i].SourceID == "" {
+			res.msgs[i].SourceID = res.sessID
+		}
 	}
-	if sessID == "" || len(msgs) == 0 {
-		return nil, nil, nil
-	}
-	return &Session{
-		Source: "pi", SourceID: sessID,
-		Project: project, Title: titleFromPrompt(firstUser),
-		StartedAt: startedAt, EndedAt: endedAt,
-		MsgCount: len(msgs),
-	}, msgs, nil
+	return res, err
 }
 
 type PiEvent struct {

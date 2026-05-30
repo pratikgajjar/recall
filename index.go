@@ -126,6 +126,15 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 	}
 	defer insSessFTS.Close()
 
+	updAgg, err := tx.Prepare(`UPDATE sessions
+		SET msg_count = COALESCE(msg_count,0) + ?,
+		    ended_at  = MAX(COALESCE(ended_at,0), ?)
+		WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer updAgg.Close()
+
 	bySession := map[string][]Message{}
 	for _, m := range msgs {
 		bySession[m.SourceID] = append(bySession[m.SourceID], m)
@@ -133,6 +142,24 @@ func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) 
 
 	for _, s := range sessions {
 		pk := source + ":" + s.SourceID
+
+		if s.Append {
+			added := 0
+			for _, m := range bySession[s.SourceID] {
+				text := trimText(m.Text)
+				if text == "" {
+					continue
+				}
+				if _, err := insFTS.Exec(pk, m.Idx, m.Role, m.TS, text); err != nil {
+					return fmt.Errorf("append msg %s/%d: %w", pk, m.Idx, err)
+				}
+				added++
+			}
+			if _, err := updAgg.Exec(added, s.EndedAt, pk); err != nil {
+				return fmt.Errorf("append agg %s: %w", pk, err)
+			}
+			continue
+		}
 		var metaBlob []byte
 		if len(s.Meta) > 0 {
 			metaBlob, _ = JSONMarshal(s.Meta)
