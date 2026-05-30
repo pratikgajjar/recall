@@ -101,8 +101,7 @@ func main() {
 			fatal(err)
 		}
 	default:
-		// Implicit search: `recall <query…> [flags…]`. Pass argv through;
-		// runFind separates flags from positionals.
+
 		if err := runFind(os.Args[1:]); err != nil {
 			fatal(err)
 		}
@@ -113,8 +112,6 @@ func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "recall: "+err.Error())
 	os.Exit(1)
 }
-
-// ---------- shared helpers ----------
 
 func defaultIndexPath() string {
 	home, _ := os.UserHomeDir()
@@ -147,9 +144,6 @@ func (cf *commonFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&cf.json, "json", false, "machine-readable output")
 }
 
-// splitFlagsAndArgs lets flags appear anywhere on the line.
-// We treat any token starting with "-" as a flag, and consume the next token as
-// its value unless it also starts with "-" or "=" is embedded.
 func splitFlagsAndArgs(in []string, boolFlags map[string]bool) (flags, positional []string) {
 	for i := 0; i < len(in); i++ {
 		a := in[i]
@@ -158,7 +152,7 @@ func splitFlagsAndArgs(in []string, boolFlags map[string]bool) (flags, positiona
 			continue
 		}
 		flags = append(flags, a)
-		// Has "=value" inline? done.
+
 		if strings.Contains(a, "=") {
 			continue
 		}
@@ -211,8 +205,6 @@ func openIndexOrFail() (*Index, error) {
 	return openIndex(path)
 }
 
-// ---------- commands ----------
-
 func runIndex(args []string) error {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	full := fs.Bool("full", false, "ignore checkpoints and reindex everything")
@@ -226,7 +218,6 @@ func runIndex(args []string) error {
 	}
 	defer ix.Close()
 
-	// Bulk ingest pragmas: safe because the index is disposable.
 	ix.BulkMode(true)
 	defer ix.BulkMode(false)
 
@@ -294,14 +285,14 @@ func runDoctor(_ []string) error {
 	}
 	fmt.Printf("index: %s (%s)\n", idxPath, humanSize(st.Size()))
 	total := 0
-	// Iterate adapters in their default order so output stays stable across runs.
+
 	for _, ad := range defaultAdapters() {
 		if c, ok := counts[ad.ID()]; ok {
 			fmt.Printf("  %-7s %d sessions\n", ad.ID(), c)
 			total += c
 		}
 	}
-	// Any source rows from older runs we no longer have an adapter for.
+
 	for src, c := range counts {
 		known := false
 		for _, ad := range defaultAdapters() {
@@ -465,7 +456,7 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 	if err != nil {
 		return fmt.Errorf("session %s: %w", id, err)
 	}
-	// Re-read from source for full fidelity (no excerpt truncation).
+
 	ad := adapterFor(s.Source)
 	if ad == nil {
 		return fmt.Errorf("no adapter for source %q", s.Source)
@@ -484,8 +475,7 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 	fmt.Printf("source=%s  project=%s  started=%s  msgs=%d\n\n",
 		s.Source, shortProject(s.Project),
 		time.UnixMilli(s.StartedAt).Format(time.RFC3339), s.MsgCount)
-	// Collapse runs of empty same-role messages so transcripts of tool-call
-	// heavy sessions don't print a wall of `## assistant\n\n## assistant\n\n`.
+
 	prevRole := ""
 	emptyRun := 0
 	for _, m := range msgs {
@@ -501,7 +491,7 @@ func printTranscript(ix *Index, id string, asJSON bool) error {
 			continue
 		}
 		if emptyRun > 1 {
-			// Note that we collapsed N silent bubbles before this content.
+
 			fmt.Printf("_(+%d more empty %s bubbles)_\n\n", emptyRun-1, prevRole)
 		}
 		emptyRun = 0
@@ -553,10 +543,10 @@ func runOpen(args []string) error {
 	}
 	switch {
 	case strings.HasPrefix(target, "cursor://"):
-		// macOS: open <uri> hands off to URL handler
+
 		return runShell("open", target)
 	default:
-		// CLI invocation form (claude --resume <id>, codex resume <id>) — just print.
+
 		fmt.Println(target)
 		return nil
 	}
@@ -593,7 +583,7 @@ func runStats(args []string) error {
 	if cf.json {
 		return JSONNewEncoder(os.Stdout).Encode(rows)
 	}
-	// Group printout by source, then project — easier to scan than 1 long table.
+
 	var totalS, totalM int
 	bySource := map[string][]StatRow{}
 	order := []string{}
@@ -674,7 +664,7 @@ func runSessions(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Default to current repo only if user gave no other filter.
+
 	if cf.repo == "" && cf.source == "" && cf.since == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			opts.Project = cwd

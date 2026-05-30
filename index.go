@@ -81,8 +81,6 @@ func firstLine(s string) string {
 	return s
 }
 
-// IngestBatch upserts a batch of sessions + messages in one tx.
-// Each session's existing messages are deleted first (cheap given size of FTS).
 func (ix *Index) IngestBatch(source string, sessions []Session, msgs []Message) error {
 	tx, err := ix.db.Begin()
 	if err != nil {
@@ -173,29 +171,17 @@ func trimText(s string) string {
 	return s
 }
 
-// BulkMode toggles SQLite pragmas tuned for bulk ingest. Safe because the
-// recall index is disposable: a crash mid-`recall index` just means rerun.
-// Callers should defer ix.BulkMode(false).
-//
-//	synchronous=OFF      — skip fsync at commit (~2× faster on APFS)
-//	journal_mode=MEMORY  — keep rollback journal off disk for this run
-//	cache_size=-262144   — 256 MB page cache
-//	FTS5 automerge=0     — defer index merging until 'optimize' below
-//
-// When BulkMode(false) is called we restore the steady state (WAL + NORMAL +
-// 64 MB cache) and run an FTS5 'optimize' once so search performance matches
-// what we'd get from incremental writes.
 func (ix *Index) BulkMode(on bool) {
 	if on {
 		_, _ = ix.db.Exec(`PRAGMA synchronous=OFF`)
 		_, _ = ix.db.Exec(`PRAGMA journal_mode=MEMORY`)
 		_, _ = ix.db.Exec(`PRAGMA cache_size=-262144`)
-		// Defer FTS5 segment merges; the integrity-check happens at optimize.
+
 		_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts, rank) VALUES('automerge', 0)`)
 		_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts, rank) VALUES('automerge', 0)`)
 		return
 	}
-	// Flush any pending merges so query latency is stable.
+
 	_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
 	_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts) VALUES('optimize')`)
 	_, _ = ix.db.Exec(`PRAGMA synchronous=NORMAL`)
@@ -234,7 +220,6 @@ func (ix *Index) Counts() (map[string]int, error) {
 	return out, rows.Err()
 }
 
-// Hit is one matched message with its parent session info.
 type Hit struct {
 	SessionID string  `json:"session_id"`
 	Source    string  `json:"source"`
@@ -244,20 +229,17 @@ type Hit struct {
 	StartedAt int64   `json:"started_at_ms"`
 	MsgIdx    int     `json:"msg_idx"`
 	Role      string  `json:"role"`
-	Snippet   string  `json:"snippet"` // FTS-highlighted excerpt
+	Snippet   string  `json:"snippet"`
 	Rank      float64 `json:"rank"`
 }
 
 func (h Hit) StartedTime() time.Time { return time.UnixMilli(h.StartedAt) }
 
-// Search runs FTS5 over messages, joins back to sessions, and ranks by bm25 + recency.
 func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return ix.recent(opts)
 	}
-	// Escape query for FTS5: wrap in double quotes to avoid syntax errors.
-	// opts.AnyTerm switches AND → OR (used by Related where ANDing 6+ terms
-	// over-constrains the match).
+
 	ftsQuery := ftsEscape(query, opts.AnyTerm)
 
 	args := []any{ftsQuery}
@@ -281,15 +263,13 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 	}
 	args = append(args, limit)
 
-	// Two FTS sources: message bodies and session titles/projects.
-	// We UNION ALL and dedup in Go, keeping the best (most negative bm25) hit per session.
-	bodyWhere := append([]string{}, where...)      // messages_fts MATCH ? + filters
-	titleWhere := []string{"sessions_fts MATCH ?"} // separate match
+	bodyWhere := append([]string{}, where...)
+	titleWhere := []string{"sessions_fts MATCH ?"}
 	titleArgs := []any{ftsQuery}
 	for _, w := range where[1:] {
 		titleWhere = append(titleWhere, w)
 	}
-	titleArgs = append(titleArgs, args[1:len(args)-1]...) // copy filter args (exclude old MATCH + limit)
+	titleArgs = append(titleArgs, args[1:len(args)-1]...)
 
 	q := `
 SELECT id, source, source_id, project, title, started_at, idx, role, snippet, rank FROM (
@@ -315,7 +295,7 @@ ORDER BY (rank * 1.0) - (started_at / 1.0e13) ASC
 LIMIT ?`
 
 	allArgs := make([]any, 0, len(args)+len(titleArgs))
-	allArgs = append(allArgs, args[:len(args)-1]...) // body args without limit
+	allArgs = append(allArgs, args[:len(args)-1]...)
 	allArgs = append(allArgs, titleArgs...)
 	allArgs = append(allArgs, args[len(args)-1])
 
@@ -325,7 +305,7 @@ LIMIT ?`
 	}
 	defer rows.Close()
 	var hits []Hit
-	seen := map[string]int{} // session_id → idx in hits; keep best snippet only
+	seen := map[string]int{}
 	for rows.Next() {
 		var h Hit
 		if err := rows.Scan(&h.SessionID, &h.Source, &h.SourceID, &h.Project, &h.Title,
@@ -384,12 +364,9 @@ type SearchOpts struct {
 	Project string
 	Since   int64
 	Limit   int
-	AnyTerm bool // OR terms instead of AND (used by Related)
+	AnyTerm bool
 }
 
-// ftsEscape turns an arbitrary user string into a safe FTS5 MATCH expression.
-// We split on whitespace, strip FTS punctuation, quote each token, and join
-// with AND (or OR when anyTerm is set).
 func ftsEscape(q string, anyTerm bool) string {
 	fields := strings.Fields(q)
 	out := make([]string, 0, len(fields))
@@ -416,7 +393,6 @@ func ftsEscape(q string, anyTerm bool) string {
 	return strings.Join(out, sep)
 }
 
-// StatRow is one bucket of `recall stats` output.
 type StatRow struct {
 	Source   string `json:"source"`
 	Project  string `json:"project,omitempty"`
@@ -424,8 +400,6 @@ type StatRow struct {
 	Messages int    `json:"messages"`
 }
 
-// Stats aggregates session/message counts by source × project, optionally
-// scoped by the same filters as Search (project, source, since).
 func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 	where := []string{"1=1"}
 	var args []any
@@ -460,14 +434,11 @@ func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 	return out, rows.Err()
 }
 
-// Related finds other sessions covering similar topics to `id` by sampling
-// distinctive terms from its title + early user messages and running them
-// back through FTS5. Lightweight pseudo-relevance feedback — no embeddings.
 func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	// Pull title + first ~5 user/assistant messages to mine a query from.
+
 	rows, err := ix.db.Query(`
 		SELECT COALESCE(s.title,''),
 		       f.text
@@ -500,7 +471,7 @@ func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Drop the seed session itself from results.
+
 	out := make([]Hit, 0, len(hits))
 	for _, h := range hits {
 		if h.SessionID == id {
@@ -514,9 +485,6 @@ func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 	return out, nil
 }
 
-// topTerms picks the highest-information tokens from text — words ≥ 4
-// letters that aren't common chat boilerplate. Good enough for related-
-// session probing without pulling in a real IDF table.
 func topTerms(text string, n int) string {
 	freq := map[string]int{}
 	for _, raw := range strings.FieldsFunc(text, func(r rune) bool {
@@ -536,7 +504,7 @@ func topTerms(text string, n int) string {
 	for k, v := range freq {
 		pairs = append(pairs, kv{k, v})
 	}
-	// Sort: higher freq first, alphabetical tiebreak.
+
 	sort.Slice(pairs, func(i, j int) bool {
 		if pairs[i].v != pairs[j].v {
 			return pairs[i].v > pairs[j].v
@@ -568,7 +536,6 @@ func isStopWord(w string) bool { return stopWords[w] }
 
 func (ix *Index) Close() error { return ix.db.Close() }
 
-// LookupSession returns a session row by composite id (e.g. "cursor:<uuid>").
 func (ix *Index) LookupSession(id string) (*Session, error) {
 	var s Session
 	var meta sql.NullString

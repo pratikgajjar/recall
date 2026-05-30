@@ -11,7 +11,7 @@ import (
 )
 
 type ClaudeAdapter struct {
-	Root string // ~/.claude/projects
+	Root string
 }
 
 func (a *ClaudeAdapter) ID() string      { return "claude" }
@@ -47,7 +47,7 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 			tok := fileTok(st)
 			nextMap[full] = tok
 			if prevMap[full] == tok {
-				continue // unchanged — skip
+				continue
 			}
 			sessID := strings.TrimSuffix(name, ".jsonl")
 			s, mm, err := a.readSession(full, sessID, project)
@@ -63,7 +63,6 @@ func (a *ClaudeAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	return sessions, msgs, encodeFileCkpt(nextMap), nil
 }
 
-// Fetch re-reads the JSONL for one session and returns untruncated messages.
 func (a *ClaudeAdapter) Fetch(sourceID string) ([]Message, error) {
 	entries, err := os.ReadDir(a.Root)
 	if err != nil {
@@ -83,7 +82,6 @@ func (a *ClaudeAdapter) Fetch(sourceID string) ([]Message, error) {
 	return nil, fmt.Errorf("claude session %s not found", sourceID)
 }
 
-// OpenURL — Claude Code resumes via `claude --resume <session-id>` in the project dir.
 func (a *ClaudeAdapter) OpenURL(sourceID string) string {
 	return "claude --resume " + sourceID
 }
@@ -150,7 +148,7 @@ func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate b
 	if len(msgs) == 0 {
 		return nil, nil, nil
 	}
-	// Prefer the cwd stamped on the events over the lossy folder-name reverse.
+
 	if cwd != "" {
 		project = cwd
 	}
@@ -163,29 +161,23 @@ func (a *ClaudeAdapter) readSessionImpl(path, sessID, project string, truncate b
 	}, msgs, nil
 }
 
-// ClaudeEvent is the typed view of one line in a Claude Code JSONL file.
-// Only fields recall consumes are decoded; sonic skips everything else.
 type ClaudeEvent struct {
-	Type      string        `json:"type"`      // "user" | "assistant" | …
-	Timestamp string        `json:"timestamp"` // RFC3339
+	Type      string        `json:"type"`
+	Timestamp string        `json:"timestamp"`
 	CWD       string        `json:"cwd"`
 	Message   ClaudeMessage `json:"message"`
 }
 
-// ClaudeMessage models the `message` field. Content is sometimes a plain
-// string, sometimes an array of typed parts.
 type ClaudeMessage struct {
 	Role    string            `json:"role"`
 	Content ClaudeMessageBody `json:"content"`
 }
 
-// ClaudeMessageBody handles content being either a string or an array of parts.
 type ClaudeMessageBody struct {
 	str   string
 	parts []ClaudePart
 }
 
-// UnmarshalJSON dispatches on the first non-whitespace byte.
 func (b *ClaudeMessageBody) UnmarshalJSON(data []byte) error {
 	for i, c := range data {
 		switch c {
@@ -201,15 +193,13 @@ func (b *ClaudeMessageBody) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ClaudePart is one element inside a content array.
 type ClaudePart struct {
-	Type    string `json:"type"` // "text" | "tool_use" | "tool_result"
+	Type    string `json:"type"`
 	Text    string `json:"text"`
-	Name    string `json:"name"`    // tool_use
-	Content string `json:"content"` // tool_result (only when it's a plain string)
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
-// Text flattens a message body to the searchable text excerpt recall stores.
 func (m ClaudeMessage) Text() string {
 	if m.Content.str != "" {
 		return m.Content.str
@@ -268,15 +258,11 @@ func parseClaudeTime(s string) int64 {
 	return 0
 }
 
-// parseTime kept for codex.go / pi.go that pass interface values from raw maps.
 func parseTime(v any) int64 {
 	s, _ := v.(string)
 	return parseClaudeTime(s)
 }
 
-// unsanitize converts "-Users-pratikgajjar-code-acme-api" → "/Users/pratikgajjar/code/acme-api".
-// We can't perfectly recover '-' inside names; we just replace '-' with '/' at known boundaries.
-// This is best-effort; we keep the original in case the user wants to search by either form.
 func unsanitize(s string) string {
 	if !strings.HasPrefix(s, "-") {
 		return s
@@ -299,7 +285,7 @@ func titleFromPrompt(p string) string {
 	if p == "" {
 		return ""
 	}
-	// strip command-message wrappers
+
 	if i := strings.Index(p, "</command-args>"); i > 0 {
 		p = p[:i]
 	}
@@ -312,5 +298,4 @@ func titleFromPrompt(p string) string {
 	return p
 }
 
-// ensure stable sort for deterministic output downstream
 var _ = sort.Strings

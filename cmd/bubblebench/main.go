@@ -1,5 +1,3 @@
-// Microbenchmark for cursor bubble decode strategies on real corpus.
-// Compares: encoding/json (stdlib), goccy/go-json, bytedance/sonic.
 package main
 
 import (
@@ -15,8 +13,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// BubbleBlob is the typed view recall needs from a Cursor bubble.
-// `type` lives on the composer header, not the bubble itself.
 type BubbleBlob struct {
 	Text     string `json:"text"`
 	RichText string `json:"richText"`
@@ -61,7 +57,6 @@ func main() {
 		return sonic.Unmarshal(raw, b)
 	})
 
-	// sonic supports a "fast" decoder that skips strict spec compliance.
 	bench("sonic ConfigFastest", blobs, func(raw []byte, b *BubbleBlob) error {
 		return sonic.ConfigFastest.Unmarshal(raw, b)
 	})

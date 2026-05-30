@@ -11,7 +11,7 @@ import (
 )
 
 type CodexAdapter struct {
-	Root string // ~/.codex/sessions
+	Root string
 }
 
 func (a *CodexAdapter) ID() string      { return "codex" }
@@ -41,7 +41,7 @@ func (a *CodexAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 		tok := fileTok(st)
 		nextMap[path] = tok
 		if prevMap[path] == tok {
-			return nil // unchanged — skip
+			return nil
 		}
 		s, mm, e := a.readSession(path, true)
 		if e != nil || s == nil {
@@ -54,9 +54,6 @@ func (a *CodexAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 	return sessions, msgs, encodeFileCkpt(nextMap), err
 }
 
-// Fetch walks the sessions tree to find the rollout file for this id, then returns
-// untruncated messages. Codex sessions are named rollout-<ts>-<id>.jsonl, so a
-// suffix match is enough.
 func (a *CodexAdapter) Fetch(sourceID string) ([]Message, error) {
 	suffix := sourceID + ".jsonl"
 	var found string
@@ -77,7 +74,6 @@ func (a *CodexAdapter) Fetch(sourceID string) ([]Message, error) {
 	return msgs, err
 }
 
-// OpenURL — Codex resumes via `codex resume <session-id>` (or `--last` for most recent).
 func (a *CodexAdapter) OpenURL(sourceID string) string {
 	return "codex resume " + sourceID
 }
@@ -151,43 +147,32 @@ func (a *CodexAdapter) readSession(path string, truncate bool) (*Session, []Mess
 	}, msgs, nil
 }
 
-// CodexEvent models one JSONL line from a Codex rollout file.
-// Only the fields recall consumes are typed; sonic skips the rest.
 type CodexEvent struct {
-	Type      string       `json:"type"` // "session_meta" | "response_item" | …
+	Type      string       `json:"type"`
 	Timestamp string       `json:"timestamp"`
 	Payload   CodexPayload `json:"payload"`
 }
 
-// CodexPayload is the union of fields seen across session_meta and
-// response_item.payload variants. Unused fields stay zero-valued.
 type CodexPayload struct {
-	// session_meta
 	ID  string `json:"id"`
 	CWD string `json:"cwd"`
 
-	// response_item — every variant carries a `type`.
 	ItemType  string       `json:"type"`
-	Role      string       `json:"role"`      // message
-	Content   []CodexPart  `json:"content"`   // message
-	Name      string       `json:"name"`      // function_call
-	Arguments string       `json:"arguments"` // function_call
-	Output    CodexCallOut `json:"output"`    // function_call_output
-	Summary   []CodexPart  `json:"summary"`   // reasoning
+	Role      string       `json:"role"`
+	Content   []CodexPart  `json:"content"`
+	Name      string       `json:"name"`
+	Arguments string       `json:"arguments"`
+	Output    CodexCallOut `json:"output"`
+	Summary   []CodexPart  `json:"summary"`
 
-	// session_meta also has a timestamp at the payload level.
 	Timestamp string `json:"timestamp"`
 }
 
-// CodexPart is one element of `content` / `summary` in a response_item.
 type CodexPart struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
 }
 
-// CodexCallOut wraps function_call_output.output, which is sometimes an
-// object {content:"…"} and sometimes a raw string. UnmarshalJSON handles
-// the polymorphism so the rest of the code sees a single `Content` field.
 type CodexCallOut struct {
 	Content string `json:"content"`
 }
@@ -208,8 +193,6 @@ func (o *CodexCallOut) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// flatten reduces a response_item payload to (role, text) — recall's
-// canonical excerpt form.
 func (p CodexPayload) flatten() (role, text string) {
 	switch p.ItemType {
 	case "message":

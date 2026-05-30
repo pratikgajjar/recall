@@ -11,7 +11,7 @@ import (
 )
 
 type CursorAdapter struct {
-	UserDir string // ~/Library/Application Support/Cursor/User
+	UserDir string
 }
 
 func (a *CursorAdapter) ID() string { return "cursor" }
@@ -20,8 +20,6 @@ func (a *CursorAdapter) Available() bool {
 	return err == nil
 }
 
-// Fetch returns the untruncated transcript for a single composer.
-// Faster than Scan() because it only touches the rows for this composerId.
 func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
 	db, err := sql.Open("sqlite", gpath+"?mode=ro&immutable=1")
@@ -30,7 +28,6 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 	}
 	defer db.Close()
 
-	// composerData blob
 	var blob []byte
 	if err := db.QueryRow(`SELECT value FROM cursorDiskKV WHERE key = ?`,
 		"composerData:"+sourceID).Scan(&blob); err != nil {
@@ -45,7 +42,6 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 		return nil, err
 	}
 
-	// All bubbles for this composer (uses key index, fast).
 	rows, err := db.Query(`SELECT key, value FROM cursorDiskKV
 		WHERE key >= ? AND key < ?`,
 		"bubbleId:"+sourceID+":", "bubbleId:"+sourceID+";")
@@ -89,7 +85,7 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 		})
 		idx++
 	}
-	// Any bubbles not in headers (rare; shouldn't happen for healthy sessions)
+
 	for mid, e := range bubbles {
 		if seen[mid] || e.text == "" {
 			continue
@@ -102,21 +98,10 @@ func (a *CursorAdapter) Fetch(sourceID string) ([]Message, error) {
 	return msgs, nil
 }
 
-// OpenURL — Cursor exposes a `cursor://anysphere.cursor-deeplink/composer/<id>` deep-link
-// but the practical UI is to relaunch Cursor with the workspace folder; we return the
-// deep-link form and let the caller `open` it on macOS.
 func (a *CursorAdapter) OpenURL(sourceID string) string {
 	return "cursor://anysphere.cursor-deeplink/composer/" + sourceID
 }
 
-// Scan reads:
-//  1. Every workspaceStorage/<hash>/state.vscdb to build composerId -> workspaceFolder map.
-//  2. globalStorage/state.vscdb for composerData:* and bubbleId:* blobs.
-//
-// Workspace folders are recovered from each workspace.json (folder URI).
-//
-// Checkpoint shape: {"rowid": N}. If prev is set, only composers whose
-// composerData or bubble rows have rowid > N are re-ingested.
 func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) {
 	prevRowID := parseCursorCkpt(prev)
 
@@ -127,10 +112,6 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	}
 	defer db.Close()
 
-	// Determine the set of composerIds to (re)ingest.
-	// For a full scan (prevRowID == 0), this is everything in composerData.
-	// For incremental, it's any composerId whose composerData OR bubble rows
-	// have rowid > prevRowID.
 	touched := map[string]bool{}
 	if prevRowID > 0 {
 		ids, _, err := a.collectTouchedComposers(db, prevRowID)
@@ -140,24 +121,21 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 		for _, id := range ids {
 			touched[id] = true
 		}
-		// Fast path: incremental scan with nothing new — emit fresh
-		// checkpoint without touching workspaceStorage at all.
+
 		if len(touched) == 0 {
 			next, _ := a.currentMaxRowID(db)
 			return nil, nil, encodeCursorCkpt(next), nil
 		}
 	}
 
-	// We will (re)ingest at least one composer, so we need project info.
 	cidToProject, err := a.mapComposersToProjects()
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("workspace scan: %w", err)
 	}
 
-	// Load composerData rows. On incremental, restrict to touched composers.
 	var rows *sql.Rows
 	if prevRowID > 0 && len(touched) > 0 {
-		// IN-list with quoted ids
+
 		ids := make([]string, 0, len(touched))
 		args := make([]any, 0, len(touched))
 		for id := range touched {
@@ -169,7 +147,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	} else if prevRowID == 0 {
 		rows, err = db.Query(`SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
 	} else {
-		// incremental but nothing changed
+
 		next, _ := a.currentMaxRowID(db)
 		return nil, nil, encodeCursorCkpt(next), nil
 	}
@@ -179,7 +157,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 
 	type composerHeader struct {
 		BubbleID string `json:"bubbleId"`
-		Type     any    `json:"type"` // sometimes int, sometimes string
+		Type     any    `json:"type"`
 		ServerID string `json:"serverBubbleId"`
 	}
 	type composerBlob struct {
@@ -192,7 +170,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 
 	type composer struct {
 		blob   composerBlob
-		nameOv string // from workspace allComposers (often present when blob.Name empty)
+		nameOv string
 	}
 
 	composers := map[string]*composer{}
@@ -216,15 +194,11 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 	}
 	rows.Close()
 
-	// Now pull bubbles. On incremental scan, restrict to the touched composer set;
-	// otherwise pull every bubble in one sweep.
 	bubblesByComp := map[string][]bubbleRow{}
 
 	var br *sql.Rows
 	if prevRowID > 0 && len(touched) > 0 {
-		// One range query per composer (uses the key index efficiently).
-		// In practice "touched" is tiny (1-10), so this is much cheaper than a
-		// full scan of 245k bubbles.
+
 		for cid := range touched {
 			rs, err := db.Query(`SELECT key, value FROM cursorDiskKV
 				WHERE key >= ? AND key < ?`,
@@ -242,8 +216,6 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 		collectBubbles(br, bubblesByComp)
 	}
 
-	// Compose sessions in the order specified by composerData.fullConversationHeadersOnly.
-	// Fall back to discovered bubble order otherwise.
 	var sessions []Session
 	var msgs []Message
 
@@ -290,7 +262,7 @@ func (a *CursorAdapter) Scan(prev string) ([]Session, []Message, string, error) 
 		sessions = append(sessions, Session{
 			Source:    "cursor",
 			SourceID:  cid,
-			Project:   cidToProject[cid], // may be "" if orphaned
+			Project:   cidToProject[cid],
 			Title:     title,
 			StartedAt: c.blob.CreatedAt,
 			EndedAt:   c.blob.CreatedAt,
@@ -311,7 +283,6 @@ type bubbleRow struct {
 	ttype      int
 }
 
-// collectBubbles drains a row iterator and buckets bubbles by composerId.
 func collectBubbles(rs *sql.Rows, into map[string][]bubbleRow) {
 	defer rs.Close()
 	for rs.Next() {
@@ -335,8 +306,6 @@ func collectBubbles(rs *sql.Rows, into map[string][]bubbleRow) {
 	}
 }
 
-// collectTouchedComposers returns composerIds whose composerData or bubble rows
-// have rowid > prevRowID, plus the current max rowid.
 func (a *CursorAdapter) collectTouchedComposers(db *sql.DB, prevRowID int64) ([]string, int64, error) {
 	seen := map[string]bool{}
 	rows, err := db.Query(`SELECT key FROM cursorDiskKV
@@ -389,11 +358,6 @@ func bubbleRole(t int) string {
 	return "tool"
 }
 
-// CursorBubble is the typed view recall keeps from one Cursor bubble blob.
-// Bubbles can be tens of MB because of `toolFormerData` (file contents,
-// terminal output, model context) — none of which we want. Decoding into
-// this struct via sonic (see jsonx.go) lets the decoder skip the heavy
-// fields without allocating into a map[string]any.
 type CursorBubble struct {
 	Type     int    `json:"type"`
 	Text     string `json:"text"`
@@ -401,8 +365,6 @@ type CursorBubble struct {
 	Content  string `json:"content"`
 }
 
-// extractBubbleText pulls the human-readable body out of a bubble blob.
-// Returns the body text and the message type code (1=user, 2=assistant, …).
 func extractBubbleText(raw []byte) (string, int) {
 	var b CursorBubble
 	if err := JSONUnmarshal(raw, &b); err != nil {
@@ -422,8 +384,6 @@ func extractBubbleText(raw []byte) (string, int) {
 	return "", b.Type
 }
 
-// richTextDoc mirrors the relevant subset of Cursor's draft-js payload —
-// a recursive tree of blocks where leaf nodes carry `text`.
 type richTextDoc struct {
 	Root struct {
 		Children []richTextNode `json:"children"`
@@ -435,10 +395,6 @@ type richTextNode struct {
 	Children []richTextNode `json:"children"`
 }
 
-// plainFromRichText extracts visible text from a Cursor richText payload.
-// The payload is a JSON-encoded string of a Lexical/draft-js style doc.
-// We try the typed shape first; if it doesn't look like a known doc we
-// just return the raw string (Cursor occasionally stores plaintext here).
 func plainFromRichText(s string) string {
 	var doc richTextDoc
 	if err := JSONUnmarshal([]byte(s), &doc); err != nil || len(doc.Root.Children) == 0 {
@@ -466,8 +422,6 @@ func plainFromRichText(s string) string {
 	return sb.String()
 }
 
-// mapComposersToProjects iterates every workspaceStorage/<hash>/state.vscdb,
-// reads composer.composerData → allComposers[], joined with workspace.json folder URI.
 func (a *CursorAdapter) mapComposersToProjects() (map[string]string, error) {
 	out := map[string]string{}
 	wsRoot := filepath.Join(a.UserDir, "workspaceStorage")

@@ -9,15 +9,8 @@ import (
 	"strings"
 )
 
-// PiAdapter indexes the pi harness's session store. Files live at
-//
-//	~/.pi/agent/sessions/<sanitized-cwd>/<timestamp>_<uuid>.jsonl
-//
-// First line is `{type:"session", id, timestamp, cwd}`; subsequent lines are
-// `{type:"message", id, parentId, timestamp, message:{role, content:[...]}}`.
-// content parts use `type` ∈ {"text","thinking","toolCall","toolResult"}.
 type PiAdapter struct {
-	Root string // ~/.pi/agent/sessions
+	Root string
 }
 
 func (a *PiAdapter) ID() string      { return "pi" }
@@ -76,8 +69,6 @@ func (a *PiAdapter) Fetch(sourceID string) ([]Message, error) {
 	return msgs, err
 }
 
-// OpenURL — pi doesn't expose a resume command line yet; surface the file path
-// so the user can `cat` / `less` / pipe it as they like.
 func (a *PiAdapter) OpenURL(sourceID string) string {
 	suffix := "_" + sourceID + ".jsonl"
 	var found string
@@ -159,22 +150,19 @@ func (a *PiAdapter) readSession(path string, truncate bool) (*Session, []Message
 	}, msgs, nil
 }
 
-// PiEvent is one line in a pi JSONL session file.
 type PiEvent struct {
-	Type      string    `json:"type"` // "session" | "message" | …
-	ID        string    `json:"id"`   // session id (when type=session)
-	CWD       string    `json:"cwd"`  // session cwd
+	Type      string    `json:"type"`
+	ID        string    `json:"id"`
+	CWD       string    `json:"cwd"`
 	Timestamp string    `json:"timestamp"`
 	Message   PiMessage `json:"message"`
 }
 
-// PiMessage is the body of a type:"message" event.
 type PiMessage struct {
-	Role    string        `json:"role"` // user | assistant | toolResult | system
+	Role    string        `json:"role"`
 	Content PiMessageBody `json:"content"`
 }
 
-// PiMessageBody is either a plain string or an array of typed parts.
 type PiMessageBody struct {
 	str   string
 	parts []PiPart
@@ -195,12 +183,6 @@ func (b *PiMessageBody) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// PiPart is one element inside a content array.
-//
-//	{type:"text",       text:"…"}
-//	{type:"thinking",   thinking:"…"}    — dropped, low signal
-//	{type:"toolCall",   name:"bash", input:{…}}
-//	{type:"toolResult", content: string | [PiPart]}
 type PiPart struct {
 	Type    string       `json:"type"`
 	Text    string       `json:"text"`
@@ -208,7 +190,6 @@ type PiPart struct {
 	Content PiToolResult `json:"content"`
 }
 
-// PiToolResult is content of a toolResult — string or array of parts.
 type PiToolResult struct {
 	str   string
 	parts []PiPart
@@ -229,7 +210,6 @@ func (r *PiToolResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Text flattens a pi message body to the searchable excerpt.
 func (m PiMessage) Text() string {
 	if m.Content.str != "" {
 		return m.Content.str
@@ -246,7 +226,7 @@ func (m PiMessage) Text() string {
 			}
 			b.WriteString(p.Text)
 		case "thinking":
-			// drop — chain-of-thought, very noisy
+
 		case "toolCall":
 			if p.Name == "" {
 				continue

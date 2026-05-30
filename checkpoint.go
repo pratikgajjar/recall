@@ -5,9 +5,6 @@ import (
 	"io/fs"
 )
 
-// fileTok is the per-file watermark token used by file-tree adapters
-// (Claude, Codex). Two files are considered "the same" if size and modtime
-// match exactly. Append-only JSONL stores satisfy this trivially.
 func fileTok(st fs.FileInfo) string {
 	return fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
 }
@@ -28,7 +25,6 @@ func encodeFileCkpt(m map[string]string) string {
 	return string(b)
 }
 
-// Cursor uses a single max-rowid watermark from cursorDiskKV.
 type cursorCkpt struct {
 	RowID int64 `json:"rowid"`
 }
