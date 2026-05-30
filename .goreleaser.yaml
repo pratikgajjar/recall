@@ -62,6 +62,8 @@ snapshot:
 changelog:
   use: github
   sort: asc
+  # Default format appends "(Author <email>)" — keep just sha + message.
+  format: "{{ .SHA }}: {{ .Message }}"
   groups:
     - title: Features
       regexp: '^.*?feat(\(.+\))??!?:.*$'
