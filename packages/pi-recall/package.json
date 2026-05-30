@@ -29,7 +29,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/pratikgajjar/recall/main/packages/pi-recall/assets/demo.png"
   },
   "files": [
     "src"
