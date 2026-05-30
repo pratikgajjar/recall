@@ -44,9 +44,49 @@ interface RunResult {
   code: number | null;
 }
 
+const REFRESH_DEBOUNCE_MS = 1500;
+
 export default function recallExtension(pi: ExtensionAPI) {
   let activeCwd = process.cwd();
   let warnedMissing = false;
+
+  // Background-refresh state. A pi extension is a long-lived process, so we
+  // keep the recall index warm out-of-band (on session start + after each
+  // agent turn) instead of paying an incremental rebuild on the query path.
+  let recallAvailable = false;
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let refreshing = false;
+
+  function autoIndexEnabled(): boolean {
+    const flag = pi.getFlag("recall-auto-index") as boolean | undefined;
+    if (flag === false) return false;
+    const env = process.env.RECALL_AUTO_INDEX;
+    if (env === "0" || env === "false" || env === "off") return false;
+    return true;
+  }
+
+  async function runRefresh(): Promise<void> {
+    refreshTimer = undefined;
+    if (!recallAvailable || !autoIndexEnabled()) return;
+    if (refreshing) {
+      scheduleRefresh(500); // one already in flight — retry shortly
+      return;
+    }
+    refreshing = true;
+    try {
+      await runRecall(["index"]);
+    } catch {
+      // best-effort; a failed background refresh just leaves the index as-is
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  function scheduleRefresh(delayMs = REFRESH_DEBOUNCE_MS): void {
+    if (!recallAvailable || !autoIndexEnabled()) return;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => void runRefresh(), delayMs);
+  }
 
   function resolveBin(): string {
     return (
@@ -165,15 +205,40 @@ export default function recallExtension(pi: ExtensionAPI) {
     type: "string",
   });
 
+  pi.registerFlag("recall-auto-index", {
+    description:
+      "Keep the recall index fresh in the background (session start + after each turn). Default: on. Disable with --recall-auto-index=false or RECALL_AUTO_INDEX=0.",
+    type: "boolean",
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     activeCwd = ctx.cwd;
     const res = await runRecall(["version"]);
+    recallAvailable = res.ok;
     if (!res.ok && !warnedMissing) {
       warnedMissing = true;
       ctx.ui.notify(
         `pi-recall: ${res.stderr || "recall CLI not available"}`,
         "warning",
       );
+    }
+    // Catch up on anything that changed since the last pi session. The
+    // incremental index is append-only, so this is cheap (~tens of ms).
+    if (recallAvailable) scheduleRefresh(0);
+  });
+
+  // After each agent response the current session's transcript has grown.
+  // Debounce a background refresh so the index reflects it before the next
+  // recall_search — the only file actively changing is this one, and we know
+  // exactly when it does. Tool calls then read an already-fresh index.
+  pi.on("agent_end", async () => {
+    scheduleRefresh();
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = undefined;
     }
   });
 

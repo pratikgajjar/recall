@@ -50,6 +50,22 @@ When the user refers to earlier work ("how did we fix…", "continue the…"),
 use the recall tools to find and read the relevant past AI session first.
 ```
 
+## Staying fresh
+
+Because the extension is a long-lived process, it keeps the index warm in the
+background so searches always reflect your latest conversations — you never pay
+an index rebuild on the query path:
+
+- On **session start** it runs an incremental `recall index` to catch up on
+  anything that changed since your last pi session.
+- After **each agent turn** it debounces a background refresh, so the session
+  you're in right now is searchable moments later.
+
+The incremental index is append-only (it reads just the new lines of changed
+session files), so each refresh is typically tens of milliseconds. Disable it
+with `--recall-auto-index=false` or `RECALL_AUTO_INDEX=0` and refresh manually
+via `/recall-index`.
+
 ## Commands
 
 - `/recall-health` — runs `recall doctor` (CLI status + detected sources).
@@ -60,6 +76,7 @@ use the recall tools to find and read the relevant past AI session first.
 | | |
 | --- | --- |
 | `--recall-bin PATH` flag / `RECALL_BIN` env | Path to the `recall` binary. Default: `recall` on `PATH`. |
+| `--recall-auto-index=false` flag / `RECALL_AUTO_INDEX=0` env | Turn off the background index refresh (on by default). |
 
 ## License
 
