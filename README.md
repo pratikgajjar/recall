@@ -93,6 +93,15 @@ args = ["mcp"]
 **pi** — use the native extension instead (no MCP needed):
 `pi install npm:@pratikgajjar/pi-recall` ([packages/pi-recall](packages/pi-recall)).
 
+**As a skill** — for any agent with a skills system + shell access (Claude Code
+Agent Skills, pi skills), drop in the [`recall` skill](skills/recall) instead of
+a server. It teaches the agent to shell out to the CLI directly:
+
+```bash
+# Claude Code
+mkdir -p ~/.claude/skills && cp -r skills/recall ~/.claude/skills/recall
+```
+
 Once connected, ask the agent things like _"use recall to find how we fixed the
 import cycle"_ and it will search and read the relevant past session.
 
