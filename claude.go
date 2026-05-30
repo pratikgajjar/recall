@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -258,11 +257,6 @@ func parseClaudeTime(s string) int64 {
 	return 0
 }
 
-func parseTime(v any) int64 {
-	s, _ := v.(string)
-	return parseClaudeTime(s)
-}
-
 func unsanitize(s string) string {
 	if !strings.HasPrefix(s, "-") {
 		return s
@@ -297,5 +291,3 @@ func titleFromPrompt(p string) string {
 	}
 	return p
 }
-
-var _ = sort.Strings
