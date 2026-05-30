@@ -1,0 +1,71 @@
+version: 2
+project_name: recall
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: recall
+    main: .
+    binary: recall
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: recall
+    name_template: "recall_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.*$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.*$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+
+release:
+  github:
+    owner: pratikgajjar
+    name: recall
+  draft: false
+  prerelease: auto
+  name_template: "recall {{ .Tag }}"
+  footer: |
+    ## Install
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/pratikgajjar/recall/main/install.sh | sh
+    ```
+
+    Or with Go: `go install github.com/pratikgajjar/recall@latest`
