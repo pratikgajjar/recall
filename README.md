@@ -39,6 +39,9 @@ $ recall last --repo ~/code/acme-api | claude -p "continue this"
 ## Install
 
 ```bash
+# Homebrew
+brew install pratikgajjar/tap/recall
+
 # one-line installer (downloads the right prebuilt binary)
 curl -fsSL https://raw.githubusercontent.com/pratikgajjar/recall/main/install.sh | sh
 
