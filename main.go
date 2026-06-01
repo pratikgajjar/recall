@@ -15,7 +15,7 @@ import (
 )
 
 // version is overridden at release time via -ldflags "-X main.version=...".
-var version = "0.1.0"
+var version = "0.1.1"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `recall %s — your AI chat history, searchable across Cursor, Claude Code, Codex, pi.
