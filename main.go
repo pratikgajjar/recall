@@ -258,31 +258,46 @@ func runIndex(args []string) error {
 		}
 		fmt.Printf("  %-7s scanning…", ad.ID())
 		os.Stdout.Sync()
-		sessions, msgs, next, err := ad.Scan(ctx, prev)
-		if err != nil {
+
+		// emit ingests a batch and commits the checkpoint that's valid as of
+		// that batch, so progress is durable and resumable mid-provider.
+		var nSess, nMsg int
+		emit := func(sessions []Session, msgs []Message, ckpt string) error {
+			if err := ix.IngestBatch(ctx, ad.ID(), sessions, msgs); err != nil {
+				return err
+			}
+			if ckpt != "" {
+				_ = ix.SetMeta("ckpt:"+ad.ID(), ckpt)
+			}
+			nSess += len(sessions)
+			nMsg += len(msgs)
+			fmt.Printf("\r\033[K  %-7s indexing… %d sessions", ad.ID(), nSess)
+			os.Stdout.Sync()
+			return nil
+		}
+
+		var scanErr error
+		if st, ok := ad.(StreamingAdapter); ok {
+			scanErr = st.ScanStream(ctx, prev, emit)
+		} else {
+			sessions, msgs, next, err := ad.Scan(ctx, prev)
+			if err != nil {
+				scanErr = err
+			} else {
+				scanErr = emit(sessions, msgs, next)
+			}
+		}
+		if scanErr != nil {
 			if ctx.Err() != nil {
 				fmt.Printf("\r\033[K")
 				break
 			}
-			fmt.Printf("\r  %-7s error: %v\n", ad.ID(), err)
+			fmt.Printf("\r\033[K  %-7s error: %v\n", ad.ID(), scanErr)
 			continue
 		}
-		fmt.Printf("\r  %-7s ingesting %d sessions…", ad.ID(), len(sessions))
-		os.Stdout.Sync()
-		if err := ix.IngestBatch(ctx, ad.ID(), sessions, msgs); err != nil {
-			if ctx.Err() != nil {
-				fmt.Printf("\r\033[K")
-				break
-			}
-			fmt.Printf("\r  %-7s ingest error: %v\n", ad.ID(), err)
-			continue
-		}
-		if next != "" {
-			_ = ix.SetMeta("ckpt:"+ad.ID(), next)
-		}
-		grand += len(sessions)
+		grand += nSess
 		fmt.Printf("\r\033[K  %-7s %6d sessions  %7d messages  %s\n",
-			ad.ID(), len(sessions), len(msgs), time.Since(t0).Round(time.Millisecond))
+			ad.ID(), nSess, nMsg, time.Since(t0).Round(time.Millisecond))
 	}
 	if ctx.Err() != nil {
 		ix.BulkMode(false, false)

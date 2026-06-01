@@ -18,18 +18,21 @@ func (a *ClaudeAdapter) ID() string      { return "claude" }
 func (a *ClaudeAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
 func (a *ClaudeAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
+	return collectScan(ctx, a, prev)
+}
+
+func (a *ClaudeAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
+	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) })
 
 	entries, err := os.ReadDir(a.Root)
 	if err != nil {
-		return nil, nil, "", err
+		return err
 	}
-	var sessions []Session
-	var msgs []Message
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, "", err
+			return err
 		}
 		if !e.IsDir() {
 			continue
@@ -57,12 +60,13 @@ func (a *ClaudeAdapter) Scan(ctx context.Context, prev string) ([]Session, []Mes
 			}
 			if ok && size > prevSt.Size && prevSt.Offset <= size {
 				if p, err := a.parse(ctx, full, prevSt.Offset, prevSt.Idx, sessID, true); err == nil && len(p.msgs) > 0 {
-					sessions = append(sessions, Session{
+					nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
+					if err := be.add(Session{
 						Source: "claude", SourceID: sessID, Append: true,
 						EndedAt: p.endedAt, MsgCount: len(p.msgs),
-					})
-					msgs = append(msgs, p.msgs...)
-					nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
+					}, p.msgs); err != nil {
+						return err
+					}
 					continue
 				}
 				// fall through to a full re-read on parse failure / truncation
@@ -77,16 +81,17 @@ func (a *ClaudeAdapter) Scan(ctx context.Context, prev string) ([]Session, []Mes
 			if p.cwd != "" {
 				proj = p.cwd
 			}
-			sessions = append(sessions, Session{
+			if err := be.add(Session{
 				Source: "claude", SourceID: sessID,
 				Project: proj, Title: titleFromPrompt(p.firstUser),
 				StartedAt: p.startedAt, EndedAt: p.endedAt,
 				MsgCount: len(p.msgs),
-			})
-			msgs = append(msgs, p.msgs...)
+			}, p.msgs); err != nil {
+				return err
+			}
 		}
 	}
-	return sessions, msgs, encodeFileCkpt(nextMap), nil
+	return be.flush()
 }
 
 func (a *ClaudeAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {

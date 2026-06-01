@@ -18,11 +18,14 @@ func (a *PiAdapter) ID() string      { return "pi" }
 func (a *PiAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
 func (a *PiAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
+	return collectScan(ctx, a, prev)
+}
+
+func (a *PiAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
+	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) })
 
-	var sessions []Session
-	var msgs []Message
 	err := filepath.WalkDir(a.Root, func(path string, d fs.DirEntry, err error) error {
 		if cErr := ctx.Err(); cErr != nil {
 			return cErr
@@ -46,13 +49,11 @@ func (a *PiAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message
 		}
 		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
 			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
-				sessions = append(sessions, Session{
+				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
+				return be.add(Session{
 					Source: "pi", SourceID: prevSt.SID, Append: true,
 					EndedAt: p.endedAt, MsgCount: len(p.msgs),
-				})
-				msgs = append(msgs, p.msgs...)
-				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
-				return nil
+				}, p.msgs)
 			}
 		}
 
@@ -61,16 +62,17 @@ func (a *PiAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message
 		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
 			return nil
 		}
-		sessions = append(sessions, Session{
+		return be.add(Session{
 			Source: "pi", SourceID: p.sessID,
 			Project: p.project, Title: titleFromPrompt(p.firstUser),
 			StartedAt: p.startedAt, EndedAt: p.endedAt,
 			MsgCount: len(p.msgs),
-		})
-		msgs = append(msgs, p.msgs...)
-		return nil
+		}, p.msgs)
 	})
-	return sessions, msgs, encodeFileCkpt(nextMap), err
+	if err != nil {
+		return err
+	}
+	return be.flush()
 }
 
 func (a *PiAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
