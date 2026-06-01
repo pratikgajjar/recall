@@ -104,133 +104,167 @@ func (a *CursorAdapter) OpenURL(sourceID string) string {
 }
 
 func (a *CursorAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
-	prevRowID := parseCursorCkpt(prev)
+	return collectScan(ctx, a, prev)
+}
+
+type cursorComposerHeader struct {
+	BubbleID string `json:"bubbleId"`
+}
+
+type cursorComposerBlob struct {
+	ComposerID                  string                 `json:"composerId"`
+	CreatedAt                   int64                  `json:"createdAt"`
+	Name                        string                 `json:"name"`
+	FullConversationHeadersOnly []cursorComposerHeader `json:"fullConversationHeadersOnly"`
+}
+
+// cursorChunk composers are read + emitted per batch so a big initial scan
+// commits progress and can resume mid-provider.
+var cursorChunk = 64
+
+func (a *CursorAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
+	ck := parseCursorCkpt(prev)
 
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
 	db, err := sql.Open("sqlite", gpath+"?mode=ro&_pragma=query_only(true)&immutable=1")
 	if err != nil {
-		return nil, nil, "", err
+		return err
 	}
 	defer db.Close()
 
-	touched := map[string]bool{}
-	if prevRowID > 0 {
-		ids, _, err := a.collectTouchedComposers(ctx, db, prevRowID)
-		if err != nil {
-			return nil, nil, "", err
-		}
-		for _, id := range ids {
-			touched[id] = true
-		}
+	curMax, err := a.currentMaxRowID(ctx, db)
+	if err != nil {
+		return err
+	}
 
-		if len(touched) == 0 {
-			next, _ := a.currentMaxRowID(ctx, db)
-			return nil, nil, encodeCursorCkpt(next), nil
+	// Decide the work list and the watermark to record once the pass completes.
+	var todo []string
+	passRowID := curMax
+	switch {
+	case len(ck.Todo) > 0:
+		// Resume an interrupted pass from exactly where it stopped.
+		todo, passRowID = ck.Todo, ck.RowID
+	case ck.RowID == 0:
+		// First full pass: every composer.
+		if todo, err = a.allComposerIDs(ctx, db); err != nil {
+			return err
+		}
+	default:
+		// Incremental: only composers touched since the last completed pass.
+		if todo, _, err = a.collectTouchedComposers(ctx, db, ck.RowID); err != nil {
+			return err
+		}
+		if len(todo) == 0 {
+			return emit(nil, nil, encodeCursorCkpt(cursorCkpt{RowID: curMax}))
 		}
 	}
+	sort.Strings(todo) // stable order → deterministic resume
 
 	cidToProject, err := a.mapComposersToProjects(ctx)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("workspace scan: %w", err)
+		return fmt.Errorf("workspace scan: %w", err)
 	}
 
-	var rows *sql.Rows
-	if prevRowID > 0 && len(touched) > 0 {
-
-		ids := make([]string, 0, len(touched))
-		args := make([]any, 0, len(touched))
-		for id := range touched {
-			ids = append(ids, "?")
-			args = append(args, "composerData:"+id)
+	if len(todo) == 0 {
+		return emit(nil, nil, encodeCursorCkpt(cursorCkpt{RowID: passRowID}))
+	}
+	for i := 0; i < len(todo); i += cursorChunk {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		q := `SELECT key, value FROM cursorDiskKV WHERE key IN (` + strings.Join(ids, ",") + `)`
-		rows, err = db.QueryContext(ctx, q, args...)
-	} else if prevRowID == 0 {
-		rows, err = db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
-	} else {
-
-		next, _ := a.currentMaxRowID(ctx, db)
-		return nil, nil, encodeCursorCkpt(next), nil
+		end := min(i+cursorChunk, len(todo))
+		sessions, msgs, err := a.readComposers(ctx, db, todo[i:end], cidToProject)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err // don't commit a chunk that may be partial
+		}
+		out := cursorCkpt{RowID: passRowID}
+		if remaining := todo[end:]; len(remaining) > 0 {
+			out.Todo = remaining
+		}
+		if err := emit(sessions, msgs, encodeCursorCkpt(out)); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func (a *CursorAdapter) allComposerIDs(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT key FROM cursorDiskKV WHERE key LIKE 'composerData:%'`)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, err
 	}
-
-	type composerHeader struct {
-		BubbleID string `json:"bubbleId"`
-		Type     any    `json:"type"`
-		ServerID string `json:"serverBubbleId"`
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		out = append(out, strings.TrimPrefix(key, "composerData:"))
 	}
-	type composerBlob struct {
-		ComposerID                  string           `json:"composerId"`
-		Text                        string           `json:"text"`
-		CreatedAt                   int64            `json:"createdAt"`
-		Name                        string           `json:"name"`
-		FullConversationHeadersOnly []composerHeader `json:"fullConversationHeadersOnly"`
+	return out, rows.Err()
+}
+
+// readComposers loads composerData + bubbles for a chunk of composer ids and
+// builds their sessions/messages.
+func (a *CursorAdapter) readComposers(ctx context.Context, db *sql.DB, cids []string, cidToProject map[string]string) ([]Session, []Message, error) {
+	if len(cids) == 0 {
+		return nil, nil, nil
 	}
-
-	type composer struct {
-		blob   composerBlob
-		nameOv string
+	ph := make([]string, len(cids))
+	args := make([]any, len(cids))
+	for i, cid := range cids {
+		ph[i] = "?"
+		args[i] = "composerData:" + cid
 	}
-
-	composers := map[string]*composer{}
-
+	rows, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key IN (`+strings.Join(ph, ",")+`)`, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	composers := map[string]*cursorComposerBlob{}
 	for rows.Next() {
 		var key string
 		var val []byte
 		if err := rows.Scan(&key, &val); err != nil {
 			rows.Close()
-			return nil, nil, "", err
+			return nil, nil, err
 		}
-		var cb composerBlob
-		if err := JSONUnmarshal(val, &cb); err != nil {
+		var cb cursorComposerBlob
+		if JSONUnmarshal(val, &cb) != nil {
 			continue
 		}
 		cid := strings.TrimPrefix(key, "composerData:")
 		if cb.ComposerID == "" {
 			cb.ComposerID = cid
 		}
-		composers[cid] = &composer{blob: cb}
+		composers[cid] = &cb
 	}
 	rows.Close()
 
 	bubblesByComp := map[string][]bubbleRow{}
-
-	var br *sql.Rows
-	if prevRowID > 0 && len(touched) > 0 {
-
-		for cid := range touched {
-			rs, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV
-				WHERE key >= ? AND key < ?`,
-				"bubbleId:"+cid+":", "bubbleId:"+cid+";")
-			if err != nil {
-				return nil, nil, "", err
-			}
-			collectBubbles(ctx, rs, bubblesByComp)
-		}
-	} else {
-		br, err = db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'`)
+	for _, cid := range cids {
+		rs, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?`,
+			"bubbleId:"+cid+":", "bubbleId:"+cid+";")
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, err
 		}
-		collectBubbles(ctx, br, bubblesByComp)
+		collectBubbles(ctx, rs, bubblesByComp)
 	}
 
 	var sessions []Session
 	var msgs []Message
-
 	for cid, c := range composers {
-		var firstUser string
 		bubbles := bubblesByComp[cid]
-		bubbleByID := map[string]bubbleRow{}
+		bubbleByID := make(map[string]bubbleRow, len(bubbles))
 		for _, b := range bubbles {
 			bubbleByID[b.msgID] = b
 		}
-
 		var ordered []bubbleRow
 		seen := map[string]bool{}
-		for _, h := range c.blob.FullConversationHeadersOnly {
+		for _, h := range c.FullConversationHeadersOnly {
 			if b, ok := bubbleByID[h.BubbleID]; ok {
 				ordered = append(ordered, b)
 				seen[h.BubbleID] = true
@@ -244,37 +278,24 @@ func (a *CursorAdapter) Scan(ctx context.Context, prev string) ([]Session, []Mes
 		if len(ordered) == 0 {
 			continue
 		}
-
+		var firstUser string
 		for idx, b := range ordered {
 			role := bubbleRole(b.ttype)
 			if role == "user" && firstUser == "" && !looksLikeWrapper(b.text) {
 				firstUser = b.text
 			}
-			msgs = append(msgs, Message{
-				SourceID: cid, Idx: idx, Role: role, TS: 0, Text: b.text,
-			})
+			msgs = append(msgs, Message{SourceID: cid, Idx: idx, Role: role, TS: 0, Text: b.text})
 		}
-
-		title := c.blob.Name
+		title := c.Name
 		if title == "" {
 			title = titleFromPrompt(firstUser)
 		}
-
 		sessions = append(sessions, Session{
-			Source:    "cursor",
-			SourceID:  cid,
-			Project:   cidToProject[cid],
-			Title:     title,
-			StartedAt: c.blob.CreatedAt,
-			EndedAt:   c.blob.CreatedAt,
-			MsgCount:  len(ordered),
+			Source: "cursor", SourceID: cid, Project: cidToProject[cid],
+			Title: title, StartedAt: c.CreatedAt, EndedAt: c.CreatedAt, MsgCount: len(ordered),
 		})
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].StartedAt < sessions[j].StartedAt
-	})
-	nextRowID, _ := a.currentMaxRowID(ctx, db)
-	return sessions, msgs, encodeCursorCkpt(nextRowID), nil
+	return sessions, msgs, nil
 }
 
 type bubbleRow struct {

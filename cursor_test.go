@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -47,6 +48,54 @@ func TestCursorScanFullAndFetch(t *testing.T) {
 	}
 	if len(full) != 2 || full[0].Role != "user" || full[1].Role != "assistant" {
 		t.Fatalf("fetch = %+v", full)
+	}
+}
+
+func TestCursorResumeMidProvider(t *testing.T) {
+	old := cursorChunk
+	cursorChunk = 1 // one composer per emit
+	defer func() { cursorChunk = old }()
+
+	userDir := t.TempDir()
+	addCursorComposers(t, userDir,
+		tComposer{id: "c1", createdAt: 1, bubbles: []tBubble{{id: "b1", typ: 1, text: "alpha"}}},
+		tComposer{id: "c2", createdAt: 2, bubbles: []tBubble{{id: "b2", typ: 1, text: "bravo"}}},
+		tComposer{id: "c3", createdAt: 3, bubbles: []tBubble{{id: "b3", typ: 1, text: "charlie"}}},
+	)
+	addCursorWorkspace(t, userDir, "ws1", "/work/acme-api", "c1", "c2", "c3")
+	ad := &CursorAdapter{UserDir: userDir}
+	ctx := context.Background()
+
+	// First run: index two composers, then "crash" before the third.
+	var committed string
+	done := 0
+	err := ad.ScanStream(ctx, "", func(s []Session, m []Message, ckpt string) error {
+		if len(s) == 0 {
+			return nil
+		}
+		if done == 2 {
+			return fmt.Errorf("boom")
+		}
+		committed = ckpt
+		done++
+		return nil
+	})
+	if err == nil || done != 2 || committed == "" {
+		t.Fatalf("expected interruption after 2 composers: done=%d err=%v", done, err)
+	}
+
+	// Resume: only the un-reached composer should be processed.
+	var resumed []string
+	if err := ad.ScanStream(ctx, committed, func(s []Session, m []Message, ckpt string) error {
+		for _, ss := range s {
+			resumed = append(resumed, ss.SourceID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(resumed) != 1 || resumed[0] != "c3" {
+		t.Fatalf("resume should process only the un-reached composer, got %v", resumed)
 	}
 }
 

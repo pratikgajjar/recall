@@ -78,21 +78,27 @@ func scanLines(ctx context.Context, r io.Reader, fn func(line []byte) error) (in
 }
 
 type cursorCkpt struct {
+	// RowID is the max cursorDiskKV rowid as of the last COMPLETED pass — the
+	// watermark used to find touched composers on the next incremental run.
 	RowID int64 `json:"rowid"`
+	// Todo lists composer ids still to process in an in-progress pass. When
+	// non-empty the pass was interrupted and must resume before RowID is
+	// trusted as a completed watermark.
+	Todo []string `json:"todo,omitempty"`
 }
 
-func parseCursorCkpt(s string) int64 {
+func parseCursorCkpt(s string) cursorCkpt {
 	if s == "" {
-		return 0
+		return cursorCkpt{}
 	}
 	var c cursorCkpt
 	if err := JSONUnmarshal([]byte(s), &c); err != nil {
-		return 0
+		return cursorCkpt{}
 	}
-	return c.RowID
+	return c
 }
 
-func encodeCursorCkpt(rowid int64) string {
-	b, _ := JSONMarshal(cursorCkpt{RowID: rowid})
+func encodeCursorCkpt(c cursorCkpt) string {
+	b, _ := JSONMarshal(c)
 	return string(b)
 }
