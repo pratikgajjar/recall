@@ -12,6 +12,9 @@ import (
 
 type ClaudeAdapter struct {
 	Root string
+	// batchSessions caps sessions per ingest batch (0 = default). Exposed for
+	// tests to force per-session flushing; not a tuning knob users need.
+	batchSessions int
 }
 
 func (a *ClaudeAdapter) ID() string      { return "claude" }
@@ -24,7 +27,7 @@ func (a *ClaudeAdapter) Scan(ctx context.Context, prev string) ([]Session, []Mes
 func (a *ClaudeAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
-	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) })
+	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) }, a.batchSessions)
 
 	entries, err := os.ReadDir(a.Root)
 	if err != nil {

@@ -12,6 +12,8 @@ import (
 
 type PiAdapter struct {
 	Root string
+	// batchSessions caps sessions per ingest batch (0 = default). Test-only.
+	batchSessions int
 }
 
 func (a *PiAdapter) ID() string      { return "pi" }
@@ -24,7 +26,7 @@ func (a *PiAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message
 func (a *PiAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
-	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) })
+	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) }, a.batchSessions)
 
 	err := filepath.WalkDir(a.Root, func(path string, d fs.DirEntry, err error) error {
 		if cErr := ctx.Err(); cErr != nil {

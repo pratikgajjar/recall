@@ -16,12 +16,13 @@ type StreamingAdapter interface {
 // including this batch is durably indexed and safe to resume from.
 type EmitFunc func(sessions []Session, msgs []Message, checkpoint string) error
 
-// Flush thresholds: emit a batch once it crosses either bound. Small enough to
-// keep memory flat and lose little work on interrupt, large enough that the
-// per-batch checkpoint write (and its re-encode) stays negligible.
-var (
-	streamBatchMessages = 10000
-	streamBatchSessions = 1000
+// Default flush thresholds: emit a batch once it crosses either bound. Small
+// enough to keep memory flat and lose little work on interrupt, large enough
+// that the per-batch checkpoint write (and its re-encode) stays negligible.
+// Adapters can override the session bound per instance (see newBatchEmitter).
+const (
+	defaultBatchMessages = 10000
+	defaultBatchSessions = 1000
 )
 
 // collectScan adapts a StreamingAdapter to the one-shot Scan signature by
@@ -43,20 +44,28 @@ func collectScan(ctx context.Context, a StreamingAdapter, prev string) ([]Sessio
 // batchEmitter accumulates sessions/messages and flushes them via emit once a
 // size threshold is crossed, tagging each flush with the current checkpoint.
 type batchEmitter struct {
-	emit     EmitFunc
-	ckpt     func() string // current cumulative checkpoint
-	sessions []Session
-	msgs     []Message
+	emit        EmitFunc
+	ckpt        func() string // current cumulative checkpoint
+	maxMessages int
+	maxSessions int
+	sessions    []Session
+	msgs        []Message
 }
 
-func newBatchEmitter(emit EmitFunc, ckpt func() string) *batchEmitter {
-	return &batchEmitter{emit: emit, ckpt: ckpt}
+// newBatchEmitter builds an emitter. maxSessions <= 0 uses the default; the
+// message bound always uses the default. (Adapters expose the session bound so
+// tests can force per-session flushing on small fixtures.)
+func newBatchEmitter(emit EmitFunc, ckpt func() string, maxSessions int) *batchEmitter {
+	if maxSessions <= 0 {
+		maxSessions = defaultBatchSessions
+	}
+	return &batchEmitter{emit: emit, ckpt: ckpt, maxMessages: defaultBatchMessages, maxSessions: maxSessions}
 }
 
 func (b *batchEmitter) add(s Session, msgs []Message) error {
 	b.sessions = append(b.sessions, s)
 	b.msgs = append(b.msgs, msgs...)
-	if len(b.msgs) >= streamBatchMessages || len(b.sessions) >= streamBatchSessions {
+	if len(b.msgs) >= b.maxMessages || len(b.sessions) >= b.maxSessions {
 		return b.flush()
 	}
 	return nil

@@ -13,6 +13,18 @@ import (
 
 type CursorAdapter struct {
 	UserDir string
+	// chunk is how many composers to read + emit per batch (0 = default).
+	// Exposed for tests to force per-composer batching on small fixtures.
+	chunk int
+}
+
+const defaultCursorChunk = 64
+
+func (a *CursorAdapter) chunkSize() int {
+	if a.chunk > 0 {
+		return a.chunk
+	}
+	return defaultCursorChunk
 }
 
 func (a *CursorAdapter) ID() string { return "cursor" }
@@ -118,10 +130,6 @@ type cursorComposerBlob struct {
 	FullConversationHeadersOnly []cursorComposerHeader `json:"fullConversationHeadersOnly"`
 }
 
-// cursorChunk composers are read + emitted per batch so a big initial scan
-// commits progress and can resume mid-provider.
-var cursorChunk = 64
-
 func (a *CursorAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	ck := parseCursorCkpt(prev)
 
@@ -168,11 +176,12 @@ func (a *CursorAdapter) ScanStream(ctx context.Context, prev string, emit EmitFu
 	if len(todo) == 0 {
 		return emit(nil, nil, encodeCursorCkpt(cursorCkpt{RowID: passRowID}))
 	}
-	for i := 0; i < len(todo); i += cursorChunk {
+	chunk := a.chunkSize()
+	for i := 0; i < len(todo); i += chunk {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		end := min(i+cursorChunk, len(todo))
+		end := min(i+chunk, len(todo))
 		sessions, msgs, err := a.readComposers(ctx, db, todo[i:end], cidToProject)
 		if err != nil {
 			return err

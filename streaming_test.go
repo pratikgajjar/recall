@@ -7,14 +7,6 @@ import (
 	"testing"
 )
 
-// setBatch temporarily forces the streaming flush thresholds (so a small
-// fixture produces one batch per session) and returns a restore func.
-func setBatch(msgs, sessions int) func() {
-	om, os := streamBatchMessages, streamBatchSessions
-	streamBatchMessages, streamBatchSessions = msgs, sessions
-	return func() { streamBatchMessages, streamBatchSessions = om, os }
-}
-
 func piFile(root, id string) string {
 	return filepath.Join(root, "-work-web", "20260503T0800_"+id+".jsonl")
 }
@@ -22,7 +14,6 @@ func piFile(root, id string) string {
 // A scan that gets interrupted mid-provider must persist progress so a re-run
 // only processes the sessions it hadn't reached yet.
 func TestStreamingResumeMidProvider(t *testing.T) {
-	defer setBatch(1, 1)() // one emit per session
 	root := t.TempDir()
 	for _, id := range []string{"a", "b", "c"} {
 		writeLines(t, piFile(root, id),
@@ -30,7 +21,7 @@ func TestStreamingResumeMidProvider(t *testing.T) {
 			piMsg("user", "message "+id, "2026-05-03T08:00:02Z"),
 		)
 	}
-	ad := &PiAdapter{Root: root}
+	ad := &PiAdapter{Root: root, batchSessions: 1} // one emit per session
 	ctx := context.Background()
 
 	// First run: succeed for the first two sessions, then "crash" before the third.

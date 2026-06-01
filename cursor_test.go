@@ -52,10 +52,6 @@ func TestCursorScanFullAndFetch(t *testing.T) {
 }
 
 func TestCursorResumeMidProvider(t *testing.T) {
-	old := cursorChunk
-	cursorChunk = 1 // one composer per emit
-	defer func() { cursorChunk = old }()
-
 	userDir := t.TempDir()
 	addCursorComposers(t, userDir,
 		tComposer{id: "c1", createdAt: 1, bubbles: []tBubble{{id: "b1", typ: 1, text: "alpha"}}},
@@ -63,7 +59,7 @@ func TestCursorResumeMidProvider(t *testing.T) {
 		tComposer{id: "c3", createdAt: 3, bubbles: []tBubble{{id: "b3", typ: 1, text: "charlie"}}},
 	)
 	addCursorWorkspace(t, userDir, "ws1", "/work/acme-api", "c1", "c2", "c3")
-	ad := &CursorAdapter{UserDir: userDir}
+	ad := &CursorAdapter{UserDir: userDir, chunk: 1} // one composer per emit
 	ctx := context.Background()
 
 	// First run: index two composers, then "crash" before the third.
