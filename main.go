@@ -176,7 +176,7 @@ func splitFlagsAndArgs(in []string, boolFlags map[string]bool) (flags, positiona
 	return
 }
 
-var sharedBoolFlags = map[string]bool{"json": true}
+var sharedBoolFlags = map[string]bool{"json": true, "outline": true}
 
 func (cf *commonFlags) toSearchOpts() (SearchOpts, error) {
 	opts := SearchOpts{
@@ -473,6 +473,8 @@ func runLast(args []string) error {
 	fs := flag.NewFlagSet("last", flag.ExitOnError)
 	var cf commonFlags
 	cf.register(fs)
+	rng := fs.String("range", "", "Python-style slice FROM:TO")
+	outline := fs.Bool("outline", false, "one line per message")
 	flagArgs, _ := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -496,32 +498,34 @@ func runLast(args []string) error {
 	if len(hits) == 0 {
 		return fmt.Errorf("no sessions found for %s", opts.Project)
 	}
-	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json)
+	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json, transcriptOpts{Range: *rng, Outline: *outline})
 }
 
 func runShow(args []string) error {
 	fs := flag.NewFlagSet("show", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable")
-	if err := fs.Parse(args); err != nil {
+	rng := fs.String("range", "", "Python-style slice FROM:TO (e.g. 100:200, :50, -10:)")
+	outline := fs.Bool("outline", false, "one line per message: [N] role: first-line")
+	flagArgs, posArgs := splitFlagsAndArgs(args, sharedBoolFlags)
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
-		return errors.New("usage: recall show <session-id>")
+	if len(posArgs) < 1 {
+		return errors.New("usage: recall show <session-id> [--range FROM:TO | --outline]")
 	}
 	ix, err := openIndexOrFail()
 	if err != nil {
 		return err
 	}
 	defer ix.Close()
-	return printTranscript(context.Background(), ix, fs.Arg(0), *asJSON)
+	return printTranscript(context.Background(), ix, posArgs[0], *asJSON, transcriptOpts{Range: *rng, Outline: *outline})
 }
 
-func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool) error {
+func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool, opts transcriptOpts) error {
 	s, err := ix.LookupSession(id)
 	if err != nil {
 		return fmt.Errorf("session %s: %w", id, err)
 	}
-
 	ad := adapterFor(s.Source)
 	if ad == nil {
 		return fmt.Errorf("no adapter for source %q", s.Source)
@@ -536,34 +540,7 @@ func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool) err
 			"messages": msgs,
 		})
 	}
-	fmt.Printf("# %s\n", s.Title)
-	fmt.Printf("source=%s  project=%s  started=%s  msgs=%d\n\n",
-		s.Source, shortProject(s.Project),
-		time.UnixMilli(s.StartedAt).Format(time.RFC3339), s.MsgCount)
-
-	prevRole := ""
-	emptyRun := 0
-	for _, m := range msgs {
-		body := strings.TrimSpace(m.Text)
-		if body == "" {
-			if m.Role == prevRole {
-				emptyRun++
-				continue
-			}
-			emptyRun = 1
-			prevRole = m.Role
-			fmt.Printf("## %s\n_(empty tool-call bubble)_\n\n", m.Role)
-			continue
-		}
-		if emptyRun > 1 {
-
-			fmt.Printf("_(+%d more empty %s bubbles)_\n\n", emptyRun-1, prevRole)
-		}
-		emptyRun = 0
-		prevRole = m.Role
-		fmt.Printf("## %s\n%s\n\n", m.Role, body)
-	}
-	return nil
+	return renderTranscript(os.Stdout, s, msgs, opts)
 }
 
 func adapterFor(source string) Adapter {

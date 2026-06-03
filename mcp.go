@@ -203,6 +203,8 @@ type toolArgs struct {
 	Source    string `json:"source"`
 	Since     string `json:"since"`
 	Limit     int    `json:"limit"`
+	Range     string `json:"range"`   // Python-style slice over the message list
+	Outline   bool   `json:"outline"` // outline mode (one line per message)
 }
 
 func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
@@ -313,28 +315,34 @@ func (s *mcpServer) transcript(ctx context.Context, a toolArgs) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	return transcriptText(sess, msgs), nil
+	opts, prelude := applyBigSessionCap(transcriptOpts{Range: a.Range, Outline: a.Outline}, len(msgs))
+	var b strings.Builder
+	b.WriteString(prelude)
+	if err := renderTranscript(&b, sess, msgs, opts); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// mcpBigSessionThreshold is when recall_transcript switches to outline-by-default
+// for agents that didn't ask for a specific slice.
+const mcpBigSessionThreshold = 200
+
+// applyBigSessionCap protects MCP callers from accidentally requesting a
+// 30k-message transcript. When no slice was requested and the session is big,
+// it switches to outline mode and returns a one-line note explaining how to
+// drill in with a 'range' on the next call.
+func applyBigSessionCap(opts transcriptOpts, msgCount int) (transcriptOpts, string) {
+	if opts.Range != "" || opts.Outline || msgCount <= mcpBigSessionThreshold {
+		return opts, ""
+	}
+	opts.Outline = true
+	return opts, fmt.Sprintf("// session has %d messages; defaulting to outline. Call recall_transcript again with range='FROM:TO' (e.g. range='-50:') to read a slice.\n\n", msgCount)
 }
 
 func hitsText(hits []Hit) string {
 	var b strings.Builder
 	printHits(&b, hits)
-	return b.String()
-}
-
-func transcriptText(s *Session, msgs []Message) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", s.Title)
-	fmt.Fprintf(&b, "source=%s  project=%s  started=%s  msgs=%d\n\n",
-		s.Source, shortProject(s.Project),
-		time.UnixMilli(s.StartedAt).Format(time.RFC3339), s.MsgCount)
-	for _, m := range msgs {
-		body := strings.TrimSpace(m.Text)
-		if body == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "## %s\n%s\n\n", m.Role, body)
-	}
 	return b.String()
 }
 
@@ -366,7 +374,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "recall_transcript",
-			"description": "Read a past AI session as a full transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since).",
+			"description": "Read a past AI session as a transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since). Large sessions: use 'outline' for a one-line-per-message overview, then 'range' to slice. After a recall_search hit at msg_idx=N, call with range='N-5:N+5' to read around it.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -374,6 +382,8 @@ func mcpTools() []map[string]any {
 					"repo":       repo,
 					"source":     source,
 					"since":      since,
+					"range":      strSchema("Python-style slice over the message list. ':100' = first 100, '-50:' = last 50, '305:315' = window. Negative indices count from the end."),
+					"outline":    map[string]any{"type": "boolean", "description": "One line per message: [N] role: first-line-truncated. Use to navigate a large session before slicing in with 'range'."},
 				},
 			},
 		},

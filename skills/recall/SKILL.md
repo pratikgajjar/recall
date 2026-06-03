@@ -40,13 +40,30 @@ recall find "import cycle proto" --limit 5
 recall find "import cycle" --json --limit 5
 ```
 
-Each hit prints a `session_id` (e.g. `cursor:94dc…`, `pi:019e…`). Read the whole
-session:
+Each hit prints a `session_id` (e.g. `cursor:94dc…`, `pi:019e…`) and a `msg`
+index pointing at the matched message. Read it:
 
 ```bash
 recall show cursor:94dc8775-5fd3-41e9-93d7-43d7dff795b6   # full transcript
 recall last --repo .                                      # most recent session in THIS project
 ```
+
+### Navigating large sessions
+
+Some sessions are huge (thousands of messages). Use `--outline` + `--range` to
+slice instead of dumping everything:
+
+```bash
+recall show <id> --outline             # [N] role: first-line  (table of contents)
+recall show <id> --range :100          # first 100 messages
+recall show <id> --range -50:          # last 50 messages
+recall show <id> --range 305:315       # window around a search hit at msg_idx=310
+```
+
+Every rendered message carries its own `## msg N/TOTAL role` header, so any
+slice is self-locating — you can re-call with a new range without re-reading
+what came before. **After a `recall find` hit at `msg=N`, prefer
+`recall show <id> --range N-5:N+5` over reading the whole session.**
 
 ## All commands
 
