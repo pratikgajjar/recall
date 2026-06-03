@@ -338,36 +338,88 @@ export default function recallExtension(pi: ExtensionAPI) {
     repo: Type.Optional(Type.String({ description: REPO_HELP })),
     source: Type.Optional(Type.String({ description: SOURCE_HELP })),
     since: Type.Optional(Type.String({ description: SINCE_HELP })),
+    range: Type.Optional(
+      Type.String({
+        description:
+          "Python-style slice over the message list. ':100' = first 100, '-50:' = last 50, '305:315' = window around a recall_search hit (msg_idx). Negative indices count from the end.",
+      }),
+    ),
+    outline: Type.Optional(
+      Type.Boolean({
+        description:
+          "One line per message ([N] role: first-line). Use to navigate a large session before slicing in with 'range'.",
+      }),
+    ),
   });
+
+  // Above this many messages, recall_transcript called without 'range' or
+  // 'outline' returns the outline instead of the full body — protects the
+  // agent from accidentally pulling a 25 MB transcript into context.
+  const BIG_SESSION_THRESHOLD = 200;
+
+  function parseMsgCount(outlineStdout: string): number {
+    const m = outlineStdout.match(/msgs=(\d+)\s+\(outline\)/);
+    return m ? Number.parseInt(m[1], 10) : 0;
+  }
 
   pi.registerTool({
     name: "recall_transcript",
     label: "recall transcript",
     description:
-      "Read a past AI session as a full transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since).",
+      "Read a past AI session as a transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since). Large sessions: use 'outline' to navigate, then 'range' to slice. After a recall_search hit at msg_idx=N, prefer range='N-5:N+5' over the full session.",
     promptSnippet: "Read a past AI session transcript",
     promptGuidelines: [
       "Call recall_transcript after recall_search to read a specific session before reusing its decisions.",
       "Omit session_id with repo: '.' to pull the most recent conversation in this project.",
+      "After a recall_search hit at msg_idx=N, call recall_transcript with range='N-5:N+5' to read around it instead of dumping the whole session.",
+      "For an unfamiliar large session, call with outline=true first — it returns one line per message so you can pick a range to drill into.",
     ],
     parameters: transcriptSchema,
 
     async execute(_id, params, signal) {
-      const args = params.session_id
-        ? ["show", params.session_id]
-        : ["last", ...buildFilterArgs({
-            repo: params.repo,
-            source: params.source,
-            since: params.since,
-          })];
-      const res = await runRecall(args, signal);
+      const filterArgs = buildFilterArgs({
+        repo: params.repo,
+        source: params.source,
+        since: params.since,
+      });
+      const cmd = params.session_id ? ["show", params.session_id] : ["last", ...filterArgs];
+
+      // Honor an explicit slice as-is.
+      if (params.range || params.outline) {
+        if (params.range) cmd.push("--range", params.range);
+        if (params.outline) cmd.push("--outline");
+        const res = await runRecall(cmd, signal);
+        if (!res.ok) {
+          const msg = res.stderr || res.stdout.trim() || `recall exited with code ${res.code}`;
+          return { content: [{ type: "text", text: msg }], details: { found: false }, isError: true };
+        }
+        return {
+          content: [{ type: "text", text: capTranscript(res.stdout.trim()) }],
+          details: { found: true },
+        };
+      }
+
+      // No slice asked for: peek at the outline first to size the session.
+      // ~ms; lets us auto-protect the agent's context on huge transcripts.
+      const peek = await runRecall([...cmd, "--outline"], signal);
+      if (!peek.ok) {
+        const msg = peek.stderr || peek.stdout.trim() || `recall exited with code ${peek.code}`;
+        return { content: [{ type: "text", text: msg }], details: { found: false }, isError: true };
+      }
+      const msgCount = parseMsgCount(peek.stdout);
+      if (msgCount > BIG_SESSION_THRESHOLD) {
+        const note =
+          `// session has ${msgCount} messages; defaulting to outline. Call recall_transcript again with range='FROM:TO' (e.g. range='-50:') to read a slice.\n\n`;
+        return {
+          content: [{ type: "text", text: capTranscript(note + peek.stdout.trim()) }],
+          details: { found: true },
+        };
+      }
+      // Small session — the full transcript is safe.
+      const res = await runRecall(cmd, signal);
       if (!res.ok) {
         const msg = res.stderr || res.stdout.trim() || `recall exited with code ${res.code}`;
-        return {
-          content: [{ type: "text", text: msg }],
-          details: { found: false },
-          isError: true,
-        };
+        return { content: [{ type: "text", text: msg }], details: { found: false }, isError: true };
       }
       return {
         content: [{ type: "text", text: capTranscript(res.stdout.trim()) }],
@@ -378,11 +430,10 @@ export default function recallExtension(pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const target = args?.session_id ?? (args?.repo ? `last in ${args.repo}` : "last");
-      text.setText(
-        theme.fg("toolTitle", theme.bold("recall transcript")) +
-          " " +
-          theme.fg("accent", target),
-      );
+      let c = theme.fg("toolTitle", theme.bold("recall transcript")) + " " + theme.fg("accent", target);
+      if (args?.outline) c += theme.fg("muted", " [outline]");
+      else if (args?.range) c += theme.fg("muted", ` [${args.range}]`);
+      text.setText(c);
       return text;
     },
     renderResult(result, options, theme, context) {

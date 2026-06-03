@@ -41,6 +41,23 @@ pi -e ./packages/pi-recall/src/index.ts
 
 All tools accept `repo` (pass `"."` for the current project), `source` (`cursor` \| `claude` \| `codex` \| `pi`), and `since` (e.g. `7d`).
 
+### Navigating large sessions
+
+Some sessions are huge (thousands of messages). `recall_transcript` takes two
+extra params to slice instead of dumping everything:
+
+- `range` — Python-style slice over the message list: `":100"` first 100,
+  `"-50:"` last 50, `"305:315"` window. Negative indices count from the end.
+- `outline` — one line per message: `[N] role: first-line`. A cheap table of
+  contents you can scan before slicing in.
+
+Every rendered message carries its own `## msg N/TOTAL role` header so any
+slice is self-locating. **Default-cap:** if a session has more than 200
+messages and you ask for neither `range` nor `outline`, the tool returns the
+outline (plus a one-line note explaining how to drill in) instead of a
+context-blowing wall of text. After a `recall_search` hit at `msg_idx=N`,
+prefer `range: "N-5:N+5"` over reading the whole session.
+
 ### Recommended agent prompt
 
 Drop into your project's `AGENTS.md` / `CLAUDE.md`:

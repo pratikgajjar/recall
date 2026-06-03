@@ -108,6 +108,11 @@ npx skills add pratikgajjar/recall          # via the skills CLI (skills.sh)
 Once connected, ask the agent things like _"use recall to find how we fixed the
 import cycle"_ and it will search and read the relevant past session.
 
+For huge sessions, every integration takes `range` (Python-style slice like
+`"305:315"` or `"-50:"`) and `outline` (one line per message), so an LLM can
+navigate and read slices instead of dumping a 25 MB transcript into context.
+Sessions over 200 messages default to outline when no slice is requested.
+
 ## Commands
 
 ```
