@@ -25,6 +25,10 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      # OIDC Trusted Publishing requires npm ≥ 11.5.1. Node 22 ships with
+      # npm ≈10.9, which signs provenance fine but fails the publish step.
+      - run: npm install -g npm@latest
+
       - run: npm install --no-fund --no-audit
 
       - run: npm run --workspace=@pratikgajjar/pi-recall typecheck
