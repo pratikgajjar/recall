@@ -43,13 +43,18 @@ All tools accept `repo` (pass `"."` for the current project), `source` (`cursor`
 
 ### Navigating large sessions
 
-Some sessions are huge (thousands of messages). `recall_transcript` takes two
-extra params to slice instead of dumping everything:
+Some sessions are huge (thousands of messages). `recall_transcript` takes
+three extra params to slice instead of dumping everything:
 
 - `range` — Python-style slice over the message list: `":100"` first 100,
   `"-50:"` last 50, `"305:315"` window. Negative indices count from the end.
 - `outline` — one line per message: `[N] role: first-line`. A cheap table of
   contents you can scan before slicing in.
+- `role` — comma-separated allowlist: `"user,assistant"` (skip tool noise),
+  `"user"` (just the prompts), `"tool"`. Tool-related labels (`toolResult`,
+  `toolCall`, `function_call`, …) all collapse to `tool`. In long agent loops,
+  ~50% of messages are tool noise; in some, 98% — a 30k-msg session shrinks to
+  ~600 with `role="user"`.
 
 Every rendered message carries its own `## msg N/TOTAL role` header so any
 slice is self-locating. **Default-cap:** if a session has more than 200

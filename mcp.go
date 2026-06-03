@@ -205,6 +205,7 @@ type toolArgs struct {
 	Limit     int    `json:"limit"`
 	Range     string `json:"range"`   // Python-style slice over the message list
 	Outline   bool   `json:"outline"` // outline mode (one line per message)
+	Role      string `json:"role"`    // comma-separated roles: user,assistant,tool
 }
 
 func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
@@ -315,7 +316,7 @@ func (s *mcpServer) transcript(ctx context.Context, a toolArgs) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	opts, prelude := applyBigSessionCap(transcriptOpts{Range: a.Range, Outline: a.Outline}, len(msgs))
+	opts, prelude := applyBigSessionCap(transcriptOpts{Range: a.Range, Outline: a.Outline, Roles: a.Role}, len(msgs))
 	var b strings.Builder
 	b.WriteString(prelude)
 	if err := renderTranscript(&b, sess, msgs, opts); err != nil {
@@ -333,11 +334,13 @@ const mcpBigSessionThreshold = 200
 // it switches to outline mode and returns a one-line note explaining how to
 // drill in with a 'range' on the next call.
 func applyBigSessionCap(opts transcriptOpts, msgCount int) (transcriptOpts, string) {
-	if opts.Range != "" || opts.Outline || msgCount <= mcpBigSessionThreshold {
+	// Any explicit slice signal (range / outline / role filter) means the caller
+	// knows what they want — don't override.
+	if opts.Range != "" || opts.Outline || opts.Roles != "" || msgCount <= mcpBigSessionThreshold {
 		return opts, ""
 	}
 	opts.Outline = true
-	return opts, fmt.Sprintf("// session has %d messages; defaulting to outline. Call recall_transcript again with range='FROM:TO' (e.g. range='-50:') to read a slice.\n\n", msgCount)
+	return opts, fmt.Sprintf("// session has %d messages; defaulting to outline. Call recall_transcript again with range='FROM:TO' (e.g. range='-50:'), or role='user,assistant' to skip tool noise.\n\n", msgCount)
 }
 
 func hitsText(hits []Hit) string {
@@ -374,7 +377,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "recall_transcript",
-			"description": "Read a past AI session as a transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since). Large sessions: use 'outline' for a one-line-per-message overview, then 'range' to slice. After a recall_search hit at msg_idx=N, call with range='N-5:N+5' to read around it.",
+			"description": "Read a past AI session as a transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since). Large sessions: use 'outline' for a one-line-per-message overview, 'range' to slice ('305:315' or '-50:'), or 'role' to filter ('user,assistant' skips tool noise; ~50% of long agent loops are tool messages). After a recall_search hit at msg_idx=N, call with range='N-5:N+5' to read around it.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -384,6 +387,7 @@ func mcpTools() []map[string]any {
 					"since":      since,
 					"range":      strSchema("Python-style slice over the message list. ':100' = first 100, '-50:' = last 50, '305:315' = window. Negative indices count from the end."),
 					"outline":    map[string]any{"type": "boolean", "description": "One line per message: [N] role: first-line-truncated. Use to navigate a large session before slicing in with 'range'."},
+					"role":       strSchema("Comma-separated roles to keep: 'user', 'assistant', 'tool'. Tool-related roles (toolResult, toolCall, function_call, etc.) collapse to 'tool'. Use 'user,assistant' to skip tool noise in long agent loops."),
 				},
 			},
 		},

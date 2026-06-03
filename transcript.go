@@ -22,6 +22,52 @@ type transcriptOpts struct {
 	//   [N] role: first-line-truncated
 	// Use it as a cheap "ls" over a giant session before slicing in.
 	Outline bool
+	// Roles is a comma-separated allowlist of canonical roles:
+	//   user | assistant | tool   (anything matching "tool"/"function_call"
+	//   collapses to "tool" — covers tool, toolResult, toolCall, etc.)
+	// Empty means "keep all". Filter applies AFTER range so absolute message
+	// indices stay consistent with what recall_search returns.
+	Roles string
+}
+
+// canonicalRole maps adapter-specific role labels into three buckets so a
+// filter like --role tool catches tool, toolResult, toolCall, function_call,
+// function_call_output, etc. uniformly across sources.
+func canonicalRole(r string) string {
+	rl := strings.ToLower(r)
+	switch rl {
+	case "user", "assistant":
+		return rl
+	}
+	if strings.Contains(rl, "tool") || strings.Contains(rl, "function_call") || strings.Contains(rl, "function_result") {
+		return "tool"
+	}
+	return rl
+}
+
+func parseRoleFilter(s string) map[string]bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, r := range strings.Split(s, ",") {
+		r = strings.TrimSpace(strings.ToLower(r))
+		if r != "" {
+			out[r] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func keepRole(role string, filter map[string]bool) bool {
+	if filter == nil {
+		return true
+	}
+	return filter[canonicalRole(role)]
 }
 
 // parseRange interprets a Python-style slice string against a population of
@@ -73,25 +119,29 @@ func parseRange(s string, total int) (lo, hi int, err error) {
 // the LLM (or human) can re-paginate without re-reading what came before.
 func renderTranscript(w io.Writer, s *Session, msgs []Message, opts transcriptOpts) error {
 	if opts.Outline {
-		return renderOutline(w, s, msgs)
+		return renderOutline(w, s, msgs, opts)
 	}
 	total := len(msgs)
 	lo, hi, err := parseRange(opts.Range, total)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "# %s\n", s.Title)
-	if lo == 0 && hi == total {
-		fmt.Fprintf(w, "source=%s  project=%s  started=%s  msgs=%d\n\n",
-			s.Source, shortProject(s.Project),
-			time.UnixMilli(s.StartedAt).Format(time.RFC3339), total)
-	} else {
-		fmt.Fprintf(w, "source=%s  project=%s  started=%s  msgs=%d  shown=[%d:%d]\n\n",
-			s.Source, shortProject(s.Project),
-			time.UnixMilli(s.StartedAt).Format(time.RFC3339), total, lo, hi)
+	roleFilter := parseRoleFilter(opts.Roles)
+	header := fmt.Sprintf("source=%s  project=%s  started=%s  msgs=%d",
+		s.Source, shortProject(s.Project),
+		time.UnixMilli(s.StartedAt).Format(time.RFC3339), total)
+	if !(lo == 0 && hi == total) {
+		header += fmt.Sprintf("  shown=[%d:%d]", lo, hi)
 	}
+	if roleFilter != nil {
+		header += "  role=" + strings.ToLower(strings.TrimSpace(opts.Roles))
+	}
+	fmt.Fprintf(w, "# %s\n%s\n\n", s.Title, header)
 	for i := lo; i < hi; i++ {
 		m := msgs[i]
+		if !keepRole(m.Role, roleFilter) {
+			continue
+		}
 		body := strings.TrimSpace(m.Text)
 		if body == "" {
 			fmt.Fprintf(w, "## msg %d/%d %s\n_(empty)_\n\n", i, total, m.Role)
@@ -107,11 +157,18 @@ func renderTranscript(w io.Writer, s *Session, msgs []Message, opts transcriptOp
 
 // renderOutline emits one line per message for cheap navigation. The position
 // numbering matches what --range slices, so an LLM can outline → pick → slice.
-func renderOutline(w io.Writer, s *Session, msgs []Message) error {
-	fmt.Fprintf(w, "# %s\n", s.Title)
-	fmt.Fprintf(w, "source=%s  project=%s  msgs=%d  (outline)\n\n",
+func renderOutline(w io.Writer, s *Session, msgs []Message, opts transcriptOpts) error {
+	roleFilter := parseRoleFilter(opts.Roles)
+	header := fmt.Sprintf("source=%s  project=%s  msgs=%d  (outline)",
 		s.Source, shortProject(s.Project), len(msgs))
+	if roleFilter != nil {
+		header += "  role=" + strings.ToLower(strings.TrimSpace(opts.Roles))
+	}
+	fmt.Fprintf(w, "# %s\n%s\n\n", s.Title, header)
 	for i, m := range msgs {
+		if !keepRole(m.Role, roleFilter) {
+			continue
+		}
 		first := strings.TrimSpace(m.Text)
 		if nl := strings.IndexByte(first, '\n'); nl > 0 {
 			first = first[:nl]

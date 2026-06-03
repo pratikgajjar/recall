@@ -117,3 +117,74 @@ func TestApplyBigSessionCap(t *testing.T) {
 		t.Errorf("small session must not be capped, got outline=%v", opts.Outline)
 	}
 }
+
+func TestCanonicalRole(t *testing.T) {
+	cases := map[string]string{
+		"user":                 "user",
+		"User":                 "user",
+		"assistant":            "assistant",
+		"tool":                 "tool",
+		"toolResult":           "tool",
+		"toolCall":             "tool",
+		"function_call":        "tool",
+		"function_call_output": "tool",
+		"function_result":      "tool",
+		"system":               "system", // unknown role passed through
+	}
+	for in, want := range cases {
+		if got := canonicalRole(in); got != want {
+			t.Errorf("canonicalRole(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRoleFilterKeepsAbsoluteIndices(t *testing.T) {
+	s := &Session{Source: "pi", SourceID: "x", Title: "demo", MsgCount: 6}
+	msgs := []Message{
+		{Idx: 0, Role: "user", Text: "q1"},
+		{Idx: 1, Role: "assistant", Text: "a1"},
+		{Idx: 2, Role: "toolCall", Text: "[tool:read]"},
+		{Idx: 3, Role: "toolResult", Text: "ok"},
+		{Idx: 4, Role: "assistant", Text: "a2"},
+		{Idx: 5, Role: "user", Text: "q2"},
+	}
+
+	var b bytes.Buffer
+	if err := renderTranscript(&b, s, msgs, transcriptOpts{Roles: "user,assistant"}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		"role=user,assistant",
+		"## msg 0/6 user",
+		"## msg 1/6 assistant",
+		"## msg 4/6 assistant", // tool rows 2,3 skipped — numbering does NOT shift
+		"## msg 5/6 user",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n---\n%s", want, out)
+		}
+	}
+	for _, gone := range []string{"toolCall", "toolResult", "[tool:read]"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("role filter should have removed %q, got:\n%s", gone, out)
+		}
+	}
+
+	// 'tool' canonicalises so --role tool catches toolCall AND toolResult.
+	b.Reset()
+	if err := renderTranscript(&b, s, msgs, transcriptOpts{Roles: "tool"}); err != nil {
+		t.Fatal(err)
+	}
+	out = b.String()
+	if !strings.Contains(out, "## msg 2/6 toolCall") || !strings.Contains(out, "## msg 3/6 toolResult") {
+		t.Errorf("--role tool should canonicalise toolCall/toolResult, got:\n%s", out)
+	}
+}
+
+func TestRoleFilterCountsAsExplicitSliceForBigSessionCap(t *testing.T) {
+	opts, prelude := applyBigSessionCap(transcriptOpts{Roles: "user"}, 10000)
+	if opts.Outline || prelude != "" {
+		t.Errorf("explicit role must not be capped, got outline=%v prelude=%q", opts.Outline, prelude)
+	}
+}

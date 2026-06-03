@@ -350,6 +350,12 @@ export default function recallExtension(pi: ExtensionAPI) {
           "One line per message ([N] role: first-line). Use to navigate a large session before slicing in with 'range'.",
       }),
     ),
+    role: Type.Optional(
+      Type.String({
+        description:
+          "Comma-separated roles to keep: 'user', 'assistant', 'tool'. Tool-related roles (toolResult, toolCall, function_call, etc.) collapse to 'tool'. Use 'user,assistant' to skip tool noise (~50% of long agent loops are tool messages).",
+      }),
+    ),
   });
 
   // Above this many messages, recall_transcript called without 'range' or
@@ -384,10 +390,11 @@ export default function recallExtension(pi: ExtensionAPI) {
       });
       const cmd = params.session_id ? ["show", params.session_id] : ["last", ...filterArgs];
 
-      // Honor an explicit slice as-is.
-      if (params.range || params.outline) {
+      // Honor an explicit slice as-is (range / outline / role all count).
+      if (params.range || params.outline || params.role) {
         if (params.range) cmd.push("--range", params.range);
         if (params.outline) cmd.push("--outline");
+        if (params.role) cmd.push("--role", params.role);
         const res = await runRecall(cmd, signal);
         if (!res.ok) {
           const msg = res.stderr || res.stdout.trim() || `recall exited with code ${res.code}`;

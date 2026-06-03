@@ -15,7 +15,7 @@ import (
 )
 
 // version is overridden at release time via -ldflags "-X main.version=...".
-var version = "0.1.2"
+var version = "0.1.3"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `recall %s — your AI chat history, searchable across Cursor, Claude Code, Codex, pi.
@@ -475,6 +475,7 @@ func runLast(args []string) error {
 	cf.register(fs)
 	rng := fs.String("range", "", "Python-style slice FROM:TO")
 	outline := fs.Bool("outline", false, "one line per message")
+	roles := fs.String("role", "", "comma-separated roles to keep: user,assistant,tool")
 	flagArgs, _ := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -498,7 +499,7 @@ func runLast(args []string) error {
 	if len(hits) == 0 {
 		return fmt.Errorf("no sessions found for %s", opts.Project)
 	}
-	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json, transcriptOpts{Range: *rng, Outline: *outline})
+	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json, transcriptOpts{Range: *rng, Outline: *outline, Roles: *roles})
 }
 
 func runShow(args []string) error {
@@ -506,19 +507,20 @@ func runShow(args []string) error {
 	asJSON := fs.Bool("json", false, "machine-readable")
 	rng := fs.String("range", "", "Python-style slice FROM:TO (e.g. 100:200, :50, -10:)")
 	outline := fs.Bool("outline", false, "one line per message: [N] role: first-line")
+	roles := fs.String("role", "", "comma-separated roles to keep: user,assistant,tool")
 	flagArgs, posArgs := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
 	if len(posArgs) < 1 {
-		return errors.New("usage: recall show <session-id> [--range FROM:TO | --outline]")
+		return errors.New("usage: recall show <session-id> [--range FROM:TO | --outline | --role user,assistant]")
 	}
 	ix, err := openIndexOrFail()
 	if err != nil {
 		return err
 	}
 	defer ix.Close()
-	return printTranscript(context.Background(), ix, posArgs[0], *asJSON, transcriptOpts{Range: *rng, Outline: *outline})
+	return printTranscript(context.Background(), ix, posArgs[0], *asJSON, transcriptOpts{Range: *rng, Outline: *outline, Roles: *roles})
 }
 
 func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool, opts transcriptOpts) error {

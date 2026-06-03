@@ -1,6 +1,6 @@
 {
   "name": "@pratikgajjar/pi-recall",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "pi extension: search your past AI chat history (Cursor, Claude Code, Codex, pi) via the recall CLI",
   "type": "module",
   "license": "MIT",

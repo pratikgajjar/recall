@@ -50,20 +50,32 @@ recall last --repo .                                      # most recent session 
 
 ### Navigating large sessions
 
-Some sessions are huge (thousands of messages). Use `--outline` + `--range` to
-slice instead of dumping everything:
+Some sessions are huge (thousands of messages — a 30k-msg agent loop is real).
+Use `--outline`, `--range`, and `--role` to slice instead of dumping everything:
 
 ```bash
-recall show <id> --outline             # [N] role: first-line  (table of contents)
-recall show <id> --range :100          # first 100 messages
-recall show <id> --range -50:          # last 50 messages
-recall show <id> --range 305:315       # window around a search hit at msg_idx=310
+recall show <id> --outline                       # [N] role: first-line  (table of contents)
+recall show <id> --range :100                    # first 100 messages
+recall show <id> --range -50:                    # last 50 messages
+recall show <id> --range 305:315                 # window around a search hit at msg_idx=310
+recall show <id> --role user,assistant           # skip tool noise (often ~50% of agent loops)
+recall show <id> --outline --role user           # just the user prompts — "what did I ask?"
+recall show <id> --range 305:315 --role assistant # combine: window + only assistants
 ```
 
 Every rendered message carries its own `## msg N/TOTAL role` header, so any
 slice is self-locating — you can re-call with a new range without re-reading
-what came before. **After a `recall find` hit at `msg=N`, prefer
+what came before. Indices are **absolute** (over the full message list), so a
+`recall find` hit at `msg=N` always maps to `--range N-5:N+5` even with a role
+filter active.
+
+Roles canonicalise to three buckets: `user`, `assistant`, `tool` (anything
+matching `tool*` / `function_call*` is `tool`).
+
+**After a `recall find` hit at `msg=N`, prefer
 `recall show <id> --range N-5:N+5` over reading the whole session.**
+**For unfamiliar large sessions, start with `--outline --role user` — the user
+prompts are a tiny, navigable spine of what the session was about.**
 
 ## All commands
 
