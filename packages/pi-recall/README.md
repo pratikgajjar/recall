@@ -8,23 +8,26 @@ It's a thin wrapper over the [`recall`](https://github.com/pratikgajjar/recall) 
 
 _The agent calls `recall_search` to find a past conversation, then reads it in full with `recall_transcript` — no copy-paste._
 
-## Prerequisites
-
-Install the `recall` CLI and build its index once:
-
-```bash
-go install github.com/pratikgajjar/recall@latest
-recall index        # one-time, ~1 minute on real data
-recall doctor        # confirm sources are detected
-```
-
 ## Install
 
 ```bash
 pi install npm:@pratikgajjar/pi-recall
 ```
 
-Or, for local development, drop it in `.pi/extensions/` or load it ad-hoc:
+The matching prebuilt `recall` binary ships with the package (as a per-platform
+`optionalDependency`), so `pi install` / `pi update` keep the extension **and**
+the binary in lockstep — no separate `go install` or `brew`. The extension
+resolves the binary in this order: `--recall-bin` flag → `RECALL_BIN` env →
+bundled binary → `recall` on `PATH`.
+
+Then build the index once:
+
+```bash
+recall index        # one-time, ~1 minute on real data
+recall doctor       # confirm sources are detected
+```
+
+For local development, load the extension ad-hoc:
 
 ```bash
 pi -e ./packages/pi-recall/src/index.ts

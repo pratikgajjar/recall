@@ -8,10 +8,38 @@
  */
 
 import { execFile } from "node:child_process";
+import { chmodSync, existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+
+const moduleRequire = createRequire(import.meta.url);
+
+// Resolve the matching prebuilt binary from optionalDependencies installed
+// by pi/npm. Returns undefined when no platform-specific package is present
+// (npm only installs the one matching the host os/arch).
+function resolveBundledBin(): string | undefined {
+  const pkg = `@pratikgajjar/recall-bin-${process.platform}-${process.arch}`;
+  try {
+    const pkgJson = moduleRequire.resolve(`${pkg}/package.json`);
+    const binPath = join(dirname(pkgJson), "recall");
+    if (!existsSync(binPath)) return undefined;
+    // npm has historically lost the +x bit on extracted tarball binaries;
+    // restore it best-effort so the first call succeeds.
+    try {
+      const mode = statSync(binPath).mode;
+      if (!(mode & 0o111)) chmodSync(binPath, 0o755);
+    } catch {
+      /* best effort */
+    }
+    return binPath;
+  } catch {
+    return undefined;
+  }
+}
 
 const DEFAULT_SEARCH_LIMIT = 15;
 const DEFAULT_SESSIONS_LIMIT = 20;
@@ -89,11 +117,13 @@ export default function recallExtension(pi: ExtensionAPI) {
   }
 
   function resolveBin(): string {
-    return (
-      (pi.getFlag("recall-bin") as string | undefined) ??
-      process.env.RECALL_BIN ??
-      "recall"
-    );
+    // Precedence: explicit flag → env override → bundled per-platform package
+    //   (installed via optionalDependencies, so `pi install`/`pi update` ship
+    //    the matching binary in lockstep with the extension) → PATH fallback.
+    const flag = pi.getFlag("recall-bin") as string | undefined;
+    if (flag) return flag;
+    if (process.env.RECALL_BIN) return process.env.RECALL_BIN;
+    return resolveBundledBin() ?? "recall";
   }
 
   function runRecall(args: string[], signal?: AbortSignal): Promise<RunResult> {

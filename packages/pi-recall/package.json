@@ -1,6 +1,6 @@
 {
   "name": "@pratikgajjar/pi-recall",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "pi extension: search your past AI chat history (Cursor, Claude Code, Codex, pi) via the recall CLI",
   "type": "module",
   "license": "MIT",
@@ -45,6 +45,12 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "optionalDependencies": {
+    "@pratikgajjar/recall-bin-darwin-arm64": "0.1.4",
+    "@pratikgajjar/recall-bin-darwin-x64": "0.1.4",
+    "@pratikgajjar/recall-bin-linux-arm64": "0.1.4",
+    "@pratikgajjar/recall-bin-linux-x64": "0.1.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
