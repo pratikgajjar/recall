@@ -1,391 +1,237 @@
-# Making recall index *anything* — a declarative adapter architecture
+# recall as a plugin host — index any agent, present and future
 
-> Goal: add a new agent's chat history by writing **data, not Go**. Ship the
-> common agents as built-in specs, and let users index in-house or brand-new
-> agents by dropping a JSON file into `~/.recall/adapters/` — no recompile, no PR.
+> The mistake is deciding *which agents to support*. We should decide on a
+> **contract** and a **plugin system**, then let agents — ours and the long
+> tail and tomorrow's not-yet-invented ones — be plugins against it. recall
+> ships zero hard-coded agents. It ships a host.
 
-This note has two halves:
+## The reframing
 
-1. **Which agents to integrate next** (the landscape, ranked).
-2. **How to architect the indexer** so each new agent is a spec, not bespoke code.
+Today `recall` has four hand-written adapters compiled into the binary. Adding
+an agent means writing Go, reviewing a PR, and cutting a release. That doesn't
+scale to a world where a new agent trends every month and every company has an
+in-house one we'll never see.
+
+Flip it: **recall is a host, agents are plugins.** There are no "built-in
+agents" — only plugins, some of which happen to ship in-tree. A plugin's *only*
+job is to turn some on-disk (or remote) storage into normalized records. recall
+owns everything else: discovery, incremental/resumable checkpointing, FTS,
+ranking, the MCP server, the CLI. That division is the entire design.
+
+## The contract (this is the whole thing)
+
+recall already has the contract — it's the `Adapter` interface in `types.go`,
+producing `Session` and `Message` rows, with an opaque resumable `checkpoint`
+string per source (`streaming.go`'s `EmitFunc`). A plugin is anything that
+satisfies that contract. The genius is that recall **already treats checkpoints
+as opaque** (`ix.GetMeta("ckpt:"+id)`), so a plugin gets incremental indexing
+for free just by honoring the same cursor it was handed last time.
+
+So we don't invent a contract — we **project the existing one onto a boundary a
+plugin can live behind**:
+
+```
+recall gives a plugin:   the previous checkpoint string (opaque), the mode (full/incremental)
+a plugin gives recall:   a stream of {session…}, {message…}, and a new checkpoint
+recall does the rest:    batching, FTS ingest, resume-on-interrupt, search, MCP
+```
+
+A `Session`/`Message`/`checkpoint` triple is the *only* interface. Three
+different ways to produce it, in increasing power and decreasing ease:
+
+## Three tiers of plugin
+
+The landscape research is what makes a tiered system work: ~15 popular agents
+collapse into a handful of *shapes* (walk files → parse JSON/SQLite → map a few
+fields). So the **easy tier covers ~90%**, and the powerful tiers exist only for
+the long tail.
+
+### Tier 0 — Declarative spec (data, no code) — the default
+
+A JSON file describes where the files are and which field is the id / role /
+timestamp / text. recall has one generic engine per *shape* (`jsonl`,
+`json_tree`, `vscdb`, `sqlite`) that interprets the spec. No toolchain, no
+compile, safe by construction, runs in-process at native speed.
+
+This is what most plugins are — including most of ours. Adding Gemini or
+Windsurf becomes a reviewable `.json` file, not Go. (Full spec schema +
+examples in the appendix.)
+
+```jsonc
+// ~/.recall/plugins/gemini.json  — a whole new agent, zero code
+{
+  "id": "gemini", "kind": "jsonl",
+  "roots": ["~/.gemini/tmp/*"],
+  "resume": "gemini --resume {id}",
+  "jsonl": {
+    "glob": "session-*.jsonl", "type_field": "type",
+    "meta":    { "match": ["session_metadata"], "session_id": {"path": "sessionId"}, "project": {"path": "cwd"} },
+    "message": { "match": ["user","gemini"], "role": {"path":"type"},
+                 "timestamp": {"path":"timestamp","format":"unix_ms"},
+                 "content": {"path":"content","parts":{"text":{"text":"text"}}} },
+    "roles": { "gemini": "assistant", "model": "assistant" }
+  }
+}
+```
+
+### Tier 1 — External executable (any language) — the real "extension"
+
+When a format can't be expressed declaratively (Aider's Markdown, opencode's
+3-file join, a cloud API, anything weird), a plugin is **any program** recall
+runs over stdio. Discovered by convention — `recall-<id>` on `PATH`, or an
+executable in `~/.recall/plugins/<id>/`. recall hands it the previous checkpoint
+on stdin; it streams NDJSON records and a new checkpoint on stdout:
+
+```
+$ recall-acme            # stdin:  {"checkpoint":"<opaque>","mode":"incremental"}
+{"type":"session","id":"…","project":"/repo","title":"…","started_at_ms":…}
+{"type":"message","session_id":"…","idx":0,"role":"user","ts_ms":…,"text":"…"}
+{"type":"message","session_id":"…","idx":1,"role":"assistant","ts_ms":…,"text":"…"}
+{"type":"checkpoint","value":"<new opaque cursor>"}
+```
+
+This is the universal escape hatch. Write a plugin in Python, Node, Rust, bash —
+whatever you already know. It's the lowest barrier for *arbitrary* logic, it
+matches recall's own nature (recall is itself a stdio/MCP program), and it keeps
+the host a single static binary with no embedded runtime. The protocol is just
+the Tier-0 record types serialized to NDJSON — one schema, two transports.
+
+> Trust note: an external plugin is arbitrary code, same trust level as
+> installing any CLI tool. Tier 0 specs are safe data. recall makes the boundary
+> explicit (`recall plugin add` shows what it installs) and runs plugins
+> read-only by convention.
+
+### Considered and deferred
+- **Embedded scripting** (Starlark/Risor — pure Go, no CGO): a middle tier
+  between data and a full process. Real, but Tier 0 + Tier 1 already span the
+  space; adding a scripting runtime is a dependency and a second mental model
+  for marginal gain. Revisit only if a class of formats wants in-process logic.
+- **WASM** (wazero, pure Go): sandboxed *and* powerful, but authoring needs a
+  WASM toolchain — that violates "easy to write." Keep on the shelf.
+- **Go `plugin` package / `.so` files:** rejected — breaks the single static
+  binary and is platform/version-locked.
+
+## Why this satisfies "tomorrow's agent"
+
+- **No release coupling.** A new agent trends → someone writes a spec or a
+  `recall-x` script → drops it in `~/.recall/plugins/` → `recall index` picks it
+  up. We ship nothing. They don't fork.
+- **No code for the common case.** 90% of agents are a Tier-0 JSON file because
+  they're all the same few shapes.
+- **No ceiling for the weird case.** Tier 1 runs anything, in any language,
+  including formats and remote sources we never imagined.
+- **In-house agents work.** A company indexes its proprietary agent without ever
+  telling us it exists.
+
+## Authoring & lifecycle — making plugins *easy*
+
+A plugin system is only as good as its authoring loop. Proposed surface:
+
+```
+recall plugin list                 all plugins (in-tree, ~/.recall/plugins), kind, version, root-exists
+recall plugin new <id> --kind jsonl scaffold a Tier-0 spec from a template
+recall plugin test <id> [file]     run the plugin against a sample, print parsed sessions/messages
+recall plugin add <github-repo>    install a shared plugin (mirrors the skills.sh pattern in the README)
+recall doctor                      already lists sources — now lists every plugin and flags bad ones
+```
+
+- **Discovery by convention.** Scan `~/.recall/plugins/*.json` (Tier 0) and
+  `~/.recall/plugins/*/` executables (Tier 1) at startup. No registration.
+- **A manifest** per plugin: `id`, `kind`, `version`, `recall_api: 1`, `roots`.
+  recall refuses or warns on an incompatible `recall_api` so plugins survive
+  host upgrades — the contract is versioned.
+- **`recall plugin test`** is the tight loop: point it at one real history file,
+  see exactly what sessions/messages come out, before indexing anything.
+- **Sharing.** Plugins are just files in a git repo; `recall plugin add
+  user/repo` fetches them. A community registry can grow without us gatekeeping,
+  the same way the repo already distributes the `recall` skill via `npx skills add`.
+
+## Where the agents we ship fit
+
+They become the *first plugins*, not special cases:
+
+| Agent(s) | Tier | Kind |
+|---|---|---|
+| Claude Code, Codex, pi, Copilot CLI, Gemini, Qwen | 0 | `jsonl` |
+| Cursor, Windsurf, Cody | 0 | `vscdb` |
+| Cline / Roo / Kilo, Continue, opencode | 0 | `json_tree` |
+| Goose, Zed | 0 | `sqlite` |
+| Aider (Markdown), any cloud-only or odd source | 1 | external `recall-<id>` |
+
+`defaultAdapters()` stops being a hard-coded list and becomes "load every
+plugin" — built-ins are embedded Tier-0 specs (`//go:embed plugins/*.json`)
+plus user plugins from disk. The four hand-written Go adapters get ported to
+specs and deleted; `adapterPath()`/`adapterFor()`'s type switches go away.
+
+## Migration (incremental, bench-gated)
+
+1. **Define the contract types + record protocol** (Session/Message/checkpoint
+   NDJSON), versioned as `recall_api: 1`.
+2. **Build the Tier-0 `jsonl` engine.** Port Claude/Codex/pi to embedded specs.
+   Gate on existing fixtures (`*_test.go`) and `bench.sh` — no `full_index_seconds`
+   regression (the `autoresearch.md` primary metric). Delete the `parse()` bodies.
+3. **Add the `vscdb` engine**, generalize Cursor, add **Windsurf** as a spec.
+4. **Ship plugin discovery from `~/.recall/plugins/`** + `recall plugin
+   list/new/test`. Now anyone adds a Tier-0 agent with no code.
+5. **Build the Tier-1 external-process runner.** Aider becomes the proof — a
+   tiny `recall-aider` script — validating the universal escape hatch.
+6. **Add `json_tree` + `sqlite` engines** → Cline/Roo/Kilo, Continue, opencode,
+   Goose, Zed as specs. **`recall plugin add <repo>`** for community sharing.
+
+### Performance guardrail
+The Tier-0 interpreter must not decode each line into `map[string]any`. Use
+sonic's AST path-gets (`sonic.Get(line, "payload","cwd")`) to pull only the
+fields a spec names, compiled once per spec. Tier-1 spawns one process per
+source per index run (not per file), so its cost is a fixed spawn, not a hot
+loop. `bench.sh` stays the gate on every step.
 
 ---
 
-## 1. The landscape — what to integrate next
+## Appendix — Tier-0 spec schema
 
-`recall` already reads Cursor, Claude Code, Codex CLI, and pi. Here is where the
-other popular agents keep their history locally, ranked by integration value
-(popularity × ease of reading from disk):
-
-| Agent | Popularity | Storage | Format | Local? | Shape |
-|---|---|---|---|---|---|
-| **Windsurf** (Codeium) | Very high | `~/Library/Application Support/Windsurf/User/…/state.vscdb` (Linux: `~/.config/Windsurf`) | SQLite KV blobs | Local | **vscdb** (≈ Cursor) |
-| **Cline** | Very high (~5M+) | VS Code globalStorage `saoudrizwan.claude-dev/tasks/<id>/` | JSON per task | Local-only | **json_tree** |
-| **Roo Code** | Very high | globalStorage `RooVeterinaryInc.roo-cline/tasks/<id>/` | JSON per task | Local-only | **json_tree** (Cline-identical) |
-| **Kilo Code** | High (~1.5M) | globalStorage `kilocode.kilo-code/tasks/<id>/` | JSON per task | Local-only | **json_tree** (Cline-family) |
-| **Continue.dev** | High | `~/.continue/sessions/<uuid>.json` + `sessions.json` | JSON per session | Local-only | **json_tree** |
-| **GitHub Copilot CLI** | Very high brand | `~/.copilot/session-state/<id>/events.jsonl` (+ SQLite) | JSONL | Local (+opt sync) | **jsonl** |
-| **Gemini CLI** | Very high | `~/.gemini/tmp/<project_hash>/logs.json` → `session-*.jsonl` | JSON→JSONL | Local-only | **jsonl** |
-| **Qwen Code** | Growing | `~/.qwen/tmp/<project_hash>/*.jsonl` | JSONL | Local-only | **jsonl** (Gemini-style) |
-| **opencode** | Growing fast | `~/.local/share/opencode/storage/{session,message,part}/…` | JSON, sharded | Local-only | **json_tree** (3-way join) |
-| **Goose** | Popular OSS | `~/.local/share/goose/sessions/sessions.db` (+legacy `*.jsonl`) | SQLite (+JSONL) | Local-only | **sqlite** (+jsonl legacy) |
-| **Zed AI** | High | `~/.local/share/zed/db/` threads; `conversations/*.json` | SQLite (+JSON) | Local-only | **sqlite** (schema undocumented) |
-| **Aider** | High niche | repo-root `.aider.chat.history.md`, `.aider.input.history` | Markdown / text | Local-only | special (no schema) |
-| **Sourcegraph Cody** | Moderate | VS Code `state.vscdb` blobs, exportable `.json` | SQLite KV | Mostly local | **vscdb** |
-| **Amp** | Growing | Sourcegraph servers (`ampcode.com/threads`) | Cloud | **Cloud-first** | skip |
-
-**Read this table column-by-column and the architecture writes itself.** Fifteen
-agents collapse into **four structural shapes** plus two skips. Every agent
-inside a shape differs only in *paths, globs, and field names* — i.e. data.
-
-### Recommended order
-1. **Windsurf** — it's `state.vscdb`, so the existing Cursor logic is ~90% reusable.
-2. **Cline / Roo / Kilo** — one `json_tree` spec covers all three (huge combined install base).
-3. **Continue.dev** — clean per-session JSON with `sessionId` + `workspaceDirectory` already present.
-4. **Copilot CLI** — native `events.jsonl`, almost identical to the Codex adapter.
-5. **Gemini CLI / Qwen Code** — JSONL; the one wrinkle is mapping the opaque
-   `<project_hash>` dir back to a real cwd (read it from session metadata, not the hash).
-6. Defer **opencode** (3-file join), **Goose/Zed** (native SQLite schemas), **Aider**
-   (Markdown only). Skip **Amp** (cloud-only — nothing on disk to read).
-
----
-
-## 2. The architecture — specs, not adapters
-
-### 2.1 What's already generic (and stays)
-
-The hard part of indexing is **already shared** and agent-agnostic. None of it
-needs to change:
-
-- `Session` / `Message` — the normalized output rows (`types.go`).
-- `StreamingAdapter` + `EmitFunc` + `batchEmitter` — batched, resumable ingest
-  (`streaming.go`).
-- `fileState` + `parseFileCkpt` / `encodeFileCkpt` + `scanLines` — per-file
-  offset checkpointing for incremental, mid-file-resumable JSONL reads
-  (`checkpoint.go`).
-- `IngestBatch`, FTS5, search, MCP — everything downstream of an `Adapter`.
-
-Look at `claude.go`, `codex.go`, and `pi.go` side by side: the `ScanStream`
-bodies are **the same function**. They walk a dir, stat each `*.jsonl`, skip
-unchanged files, append-parse grown files from `prevSt.Offset`, full-parse new
-ones, and emit batches. The *only* real differences are in `parse()`:
-
-| Variation | claude | codex | pi |
-|---|---|---|---|
-| file glob | `*.jsonl` | `rollout-*.jsonl` | `*.jsonl` |
-| session id | filename stem | `payload.id` in `session_meta` | `id` in `session` event |
-| project/cwd | `cwd` field | `payload.cwd` | `cwd` |
-| type field | `type` | `type` | `type` |
-| meta event | — | `session_meta` | `session` |
-| message event | `user`,`assistant` | `response_item` | `message` |
-| role | `= type` | `payload.role` / derived | `message.role` |
-| content | string \| `[]part` | `payload.content[]` | `message.content` str\|`[]part` |
-| part kinds | text, tool_use, tool_result | message, function_call, reasoning | text, toolCall, toolResult |
-
-**Every one of those rows is data.** That's the thesis: replace the three
-`parse()` functions + event structs with **one engine driven by a spec**.
-
-### 2.2 The spec
-
-A `SourceSpec` declaratively describes one agent. The `Kind` selects which
-generic engine interprets the rest:
+`Kind` selects the engine; the rest is data. A `FieldSrc` says where a value
+comes from (a JSON path, a constant, or the filename).
 
 ```go
-// SourceSpec describes how to discover and parse one agent's history on disk.
-// A generic engine turns it into an Adapter — so a new agent is data, not code.
 type SourceSpec struct {
-    ID     string   `json:"id"`      // "gemini", "copilot", "windsurf"
-    Kind   string   `json:"kind"`    // "jsonl" | "json_tree" | "vscdb" | "sqlite"
-    Roots  []string `json:"roots"`   // ~-expanded; all existing roots scanned
-    Resume string   `json:"resume"`  // OpenURL template, e.g. "claude --resume {id}"
+    ID     string   `json:"id"`     // "gemini", "windsurf"
+    Kind   string   `json:"kind"`   // "jsonl" | "json_tree" | "vscdb" | "sqlite"
+    Roots  []string `json:"roots"`  // ~-expanded; all existing roots scanned
+    Resume string   `json:"resume"` // OpenURL template, "claude --resume {id}"
+    APIVer int      `json:"recall_api"`
 
     JSONL    *JSONLSpec    `json:"jsonl,omitempty"`
     JSONTree *JSONTreeSpec `json:"json_tree,omitempty"`
     VSCDB    *VSCDBSpec    `json:"vscdb,omitempty"`
     SQLite   *SQLiteSpec   `json:"sqlite,omitempty"`
 }
-```
 
-A **field source** says where a value comes from — a JSON path into an event, a
-constant, or the filename:
-
-```go
 type FieldSrc struct {
-    Path     string `json:"path,omitempty"`     // dotted/indexed: "payload.cwd", "message.content[0].text"
-    Const    string `json:"const,omitempty"`    // literal value
+    Path     string `json:"path,omitempty"`     // "payload.cwd", "message.content[0].text"
+    Const    string `json:"const,omitempty"`
     Filename string `json:"filename,omitempty"` // "stem" | "suffix:_<x>.jsonl"
     Format   string `json:"format,omitempty"`   // "rfc3339" | "unix_ms" | "unix_s"
 }
-```
 
-#### JSONL kind — covers claude, codex, pi, Copilot, Gemini, Qwen
-
-```go
-type JSONLSpec struct {
-    Glob      string   `json:"glob"`       // "*.jsonl", "rollout-*.jsonl"
-    TypeField string   `json:"type_field"` // "type"
-
-    Meta struct {                          // the once-per-file session event (optional)
-        Match     []string `json:"match"`     // type values, e.g. ["session_meta"]
-        SessionID FieldSrc `json:"session_id"` // or set SessionID.Filename for claude
-        Project   FieldSrc `json:"project"`
-        StartedAt FieldSrc `json:"started_at"`
-    } `json:"meta"`
-
-    SessionID FieldSrc `json:"session_id"` // used when there's no meta event (claude: filename stem)
-
-    Message struct {
-        Match     []string    `json:"match"`     // ["response_item"] | ["user","assistant"]
-        Role      FieldSrc    `json:"role"`      // Path, or Const, or Filename
-        Timestamp FieldSrc    `json:"timestamp"`
-        Content   ContentSpec `json:"content"`
-    } `json:"message"`
-
-    Roles map[string]string `json:"roles,omitempty"` // normalize: "gemini"->"assistant"
-}
-```
-
-`ContentSpec` is the one genuinely tricky bit — but it's bounded, because every
-agent's content is *"a string, or a list of typed parts."*
-
-```go
+// Content is always "a string, or a list of typed parts" — so this covers all of them.
 type ContentSpec struct {
-    Path  string              `json:"path"`            // to the string or the []parts
+    Path  string              `json:"path"`
     Parts map[string]PartRule `json:"parts,omitempty"` // keyed by part "type"
 }
-
 type PartRule struct {
     Text     string `json:"text,omitempty"`     // path within the part to plain text
     Template string `json:"template,omitempty"` // "[tool:{name}]", "[result] {content}"
-    MaxLen   int    `json:"max_len,omitempty"`  // truncate (tool output → 400)
-    Skip     bool   `json:"skip,omitempty"`     // e.g. pi "thinking"
+    MaxLen   int    `json:"max_len,omitempty"`  // truncate tool output → 400
+    Skip     bool   `json:"skip,omitempty"`     // drop e.g. pi "thinking"
 }
 ```
 
-That reproduces today's `ClaudeMessage.Text()` / `PiMessage.Text()` /
-`CodexPayload.flatten()` exactly — the `tool_use → [tool:name]`, the 400-char
-truncation, the dropped thinking blocks — all as table entries.
-
-#### VSCDB kind — covers Cursor, Windsurf, Cody
-
-Cursor's adapter is already this shape; Windsurf differs by **path + key names**:
-
-```go
-type VSCDBSpec struct {
-    GlobalDB      string   `json:"global_db"`       // "globalStorage/state.vscdb"
-    WorkspaceGlob string   `json:"workspace_glob"`  // "workspaceStorage/*/state.vscdb"
-    SessionPrefix string   `json:"session_prefix"`  // "composerData:"
-    MessagePrefix string   `json:"message_prefix"`  // "bubbleId:"
-    HeadersPath   string   `json:"headers_path"`    // "fullConversationHeadersOnly[].bubbleId"
-    TextPaths     []string `json:"text_paths"`      // ["text","richText","content"] (first non-empty)
-    RoleField     string   `json:"role_field"`      // "type"; mapped via Roles
-    TitlePath     string   `json:"title_path"`      // "name"
-    CreatedPath   string   `json:"created_path"`    // "createdAt"
-}
-```
-
-#### SQLite kind — covers Goose, Zed (bring-your-own-SQL)
-
-```go
-type SQLiteSpec struct {
-    DB           string            `json:"db"`            // "sessions.db"
-    SessionsSQL  string            `json:"sessions_sql"`  // SELECT id,title,cwd,started_at,…
-    MessagesSQL  string            `json:"messages_sql"`  // SELECT session_id,idx,role,ts,text WHERE …
-    ColumnMap    map[string]string `json:"columns"`       // result column -> Session/Message field
-    Roles        map[string]string `json:"roles,omitempty"`
-}
-```
-
-#### JSONTree kind — covers Cline/Roo/Kilo, Continue, opencode
-
-A directory of session folders/files; each holds a message array.
-
-```go
-type JSONTreeSpec struct {
-    SessionGlob string   `json:"session_glob"` // "tasks/*/", "sessions/*.json"
-    SessionFile string   `json:"session_file"` // "api_conversation_history.json" ("" if glob IS the file)
-    SessionID   FieldSrc `json:"session_id"`   // usually folder/file name
-    Project     FieldSrc `json:"project"`      // from a sibling metadata file or a field
-    MessagesPath string  `json:"messages_path"`// "history", "" (root array), "messages"
-    Message struct {
-        Role      FieldSrc    `json:"role"`
-        Timestamp FieldSrc    `json:"timestamp"`
-        Content   ContentSpec `json:"content"`
-    } `json:"message"`
-}
-```
-
-### 2.3 The engines
-
-One small generic adapter per kind, each implementing the existing `Adapter` +
-`StreamingAdapter` interfaces. The `jsonl` and `json_tree` engines **reuse**
-`scanLines`, `fileState`, and `batchEmitter` unchanged — they only swap the
-hand-written `parse()` for a spec interpreter:
-
-```go
-type specAdapter struct {
-    spec   SourceSpec
-    engine engine // jsonlEngine | jsonTreeEngine | vscdbEngine | sqliteEngine
-}
-
-func (a *specAdapter) ID() string              { return a.spec.ID }
-func (a *specAdapter) Available() bool         { return a.engine.anyRootExists() }
-func (a *specAdapter) OpenURL(id string) string { return render(a.spec.Resume, id) }
-func (a *specAdapter) ScanStream(ctx, prev, emit) error { return a.engine.scan(ctx, a.spec, prev, emit) }
-```
-
-The interpreter walks `FieldSrc.Path` over each line. To stay within the
-project's performance budget (see `autoresearch.md` — full index time is the
-primary metric), **do not decode each line into `map[string]any`.** Use sonic's
-AST path access (`sonic.Get(line, "payload", "cwd")`) to pull only the handful
-of fields a spec names, skipping the rest of the blob. Compile each spec's paths
-once at load. This keeps the hot loop allocation-light and close to the current
-typed-struct speed.
-
-### 2.4 The registry — this is the "without us adding code" part
-
-```go
-func loadSpecs() []SourceSpec {
-    var specs []SourceSpec
-    specs = append(specs, builtinSpecs()...)             // //go:embed adapters/*.json
-    specs = append(specs, userSpecs("~/.recall/adapters/*.json")...) // runtime, user-supplied
-    return specs
-}
-
-func defaultAdapters() []Adapter {
-    var out []Adapter
-    for _, s := range loadSpecs() {
-        out = append(out, newSpecAdapter(s))
-    }
-    return out
-}
-```
-
-Two consequences:
-
-- **Built-in agents ship as embedded JSON specs.** Adding Windsurf/Cline/Gemini
-  to the binary is a new `adapters/<id>.json` file — reviewable as data, no Go.
-- **Users index anything we've never heard of.** Drop
-  `~/.recall/adapters/acme.json` describing your company's in-house agent and
-  `recall index` picks it up. No fork, no recompile, no waiting on a release.
-  That is literally "anything indexable without us adding specific code."
-
-`recall doctor` lists every spec (built-in + user) and whether its roots exist,
-so a malformed or mis-pathed user spec is obvious immediately. `adapterPath()`
-and `adapterFor()` in `main.go` lose their hardcoded type switches and read from
-the spec instead.
-
-### 2.5 Example specs
-
-**claude** (no meta event — id from filename):
-
-```json
-{
-  "id": "claude",
-  "kind": "jsonl",
-  "roots": ["~/.claude/projects"],
-  "resume": "claude --resume {id}",
-  "jsonl": {
-    "glob": "*.jsonl",
-    "type_field": "type",
-    "session_id": { "filename": "stem" },
-    "message": {
-      "match": ["user", "assistant"],
-      "role": { "path": "type" },
-      "timestamp": { "path": "timestamp", "format": "rfc3339" },
-      "content": {
-        "path": "message.content",
-        "parts": {
-          "text":        { "text": "text" },
-          "tool_use":    { "template": "[tool_use:{name}]" },
-          "tool_result": { "template": "[tool_result] {content}", "max_len": 400 }
-        }
-      }
-    }
-  }
-}
-```
-
-**gemini** (new agent — pure data, mirrors the Codex pattern):
-
-```json
-{
-  "id": "gemini",
-  "kind": "jsonl",
-  "roots": ["~/.gemini/tmp/*"],
-  "resume": "gemini --resume {id}",
-  "jsonl": {
-    "glob": "session-*.jsonl",
-    "type_field": "type",
-    "meta": {
-      "match": ["session_metadata"],
-      "session_id": { "path": "sessionId" },
-      "project": { "path": "cwd" }
-    },
-    "message": {
-      "match": ["user", "gemini"],
-      "role": { "path": "type" },
-      "timestamp": { "path": "timestamp", "format": "unix_ms" },
-      "content": { "path": "content", "parts": { "text": { "text": "text" } } }
-    },
-    "roles": { "gemini": "assistant", "model": "assistant" }
-  }
-}
-```
-
-**windsurf** (reuses the Cursor/vscdb engine — just a different path):
-
-```json
-{
-  "id": "windsurf",
-  "kind": "vscdb",
-  "roots": ["~/Library/Application Support/Windsurf/User", "~/.config/Windsurf/User"],
-  "resume": "windsurf://…/{id}",
-  "vscdb": {
-    "global_db": "globalStorage/state.vscdb",
-    "workspace_glob": "workspaceStorage/*/state.vscdb",
-    "session_prefix": "composerData:",
-    "message_prefix": "bubbleId:",
-    "headers_path": "fullConversationHeadersOnly[].bubbleId",
-    "text_paths": ["text", "richText", "content"],
-    "role_field": "type",
-    "title_path": "name",
-    "created_path": "createdAt"
-  }
-}
-```
-
----
-
-## 3. Migration path (incremental, zero-regression)
-
-1. **Build the `jsonl` engine + spec types.** Port **claude, codex, pi** to
-   embedded specs. Keep the typed adapters until the engine's output matches
-   byte-for-byte. Gate on the existing fixtures (`claude_test.go`, `codex_test.go`,
-   `pi_test.go`) and on `bench.sh` showing no `full_index_seconds` regression
-   (the autoresearch primary metric). Delete the three `parse()` bodies once green.
-2. **Add the new JSONL agents as specs only:** Copilot CLI, Gemini, Qwen. No Go.
-3. **Generalize Cursor into the `vscdb` engine**, then add **Windsurf** (and
-   later Cody) as specs.
-4. **Add the `json_tree` engine** → Cline/Roo/Kilo (one spec family) + Continue + opencode.
-5. **Add the `sqlite` engine** → Goose + Zed when their schemas are pinned down.
-6. **Ship spec loading from `~/.recall/adapters/`** and document the spec format
-   so users (and we) add agents without touching Go.
-
-### What stays special-cased
-- **Aider** — Markdown transcript, no session ids/timestamps. Needs a tiny
-  bespoke reader or a generic `markdown` kind later; not worth a spec field today.
-- **Amp** — cloud-only. Out of scope for a read-from-disk indexer by definition.
-
-### Risks / things to watch
-- **Performance.** A naïve `map[string]any` interpreter would regress the
-  primary metric. Mitigation: sonic AST path-gets + compiled paths (§2.3); keep
-  `bench.sh` as the gate.
-- **Content flattening is the long tail.** Most agents fit
-  string-or-typed-parts, but odd cases (opencode's part sharding, Codex's
-  `reasoning` summaries) may need one or two extra `PartRule` knobs. Add them as
-  data when a real format demands it, not speculatively.
-- **Spec validation.** User specs are untrusted input; validate on load and have
-  `recall doctor` surface bad paths/missing roots clearly.
+The four engines reuse the existing machinery untouched — `jsonl`/`json_tree`
+ride on `scanLines`/`fileState`/`batchEmitter`; `vscdb` is Cursor's logic
+parameterized by key prefixes + text paths; `sqlite` is bring-your-own-SQL with
+a column→field map. (Per-kind sub-structs omitted here for brevity — see the
+field tables: glob, type_field, meta{match,session_id,project}, message{match,
+role,timestamp,content}, roles for `jsonl`; session_prefix/message_prefix/
+headers_path/text_paths for `vscdb`; sessions_sql/messages_sql/columns for
+`sqlite`; session_glob/session_file/messages_path for `json_tree`.)
 </content>
-</invoke>
