@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -37,15 +38,29 @@ type luaAdapter struct {
 // resume a session, plus which transform functions it exposes.
 type luaManifest struct {
 	id     string
-	kind   string // "line" (JSONL, offset-resumable) | "file" (whole-file)
+	kind   string // "line" | "file" | "kv"
 	roots  []string
-	glob   string // matched against each file's base name (filepath.Match)
+	glob   string // line/file kinds: matched against each file's base name
 	resume string // OpenURL template, {id} substituted
+
+	// kv-kind fields. The host opens `source` (sqlite, read-only), scans rows
+	// whose key starts with `prefix` as session headers, and for each header
+	// runs a range scan whose key range comes from `related` (with {id}
+	// substituted). The plugin transforms (header_value, related_rows) into
+	// Session + Messages via session(id, header_value, related_rows, st).
+	source  string // single sqlite file path (~ expanded)
+	table   string // sqlite table name (sanitized identifier)
+	prefix  string // header key prefix; id = key[len(prefix):]
+	related string // optional related-rows range template, {id} substituted
 }
 
 func (a *luaAdapter) ID() string { return a.man.id }
 
 func (a *luaAdapter) Available() bool {
+	if a.man.kind == "kv" {
+		_, err := os.Stat(a.expandKVSource())
+		return err == nil
+	}
 	for _, r := range a.expandRoots() {
 		if _, err := os.Stat(r); err == nil {
 			return true
@@ -84,6 +99,19 @@ func (a *luaAdapter) expandRoots() []string {
 	return out
 }
 
+// expandKVSource resolves ~ in the kv-source path. Single file, no glob.
+func (a *luaAdapter) expandKVSource() string {
+	s := a.man.source
+	home, _ := os.UserHomeDir()
+	if s == "~" {
+		return home
+	}
+	if strings.HasPrefix(s, "~/") {
+		return filepath.Join(home, s[2:])
+	}
+	return s
+}
+
 // walkFiles invokes fn for every file under the adapter's roots whose base name
 // matches the plugin's glob. Skips heavy/irrelevant directories so a root like
 // "~" doesn't drag in .git or node_modules.
@@ -117,6 +145,9 @@ func (a *luaAdapter) walkFiles(ctx context.Context, fn func(path string, d fs.Di
 }
 
 func (a *luaAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
+	if a.man.kind == "kv" {
+		return a.kvScanStream(ctx, prev, emit)
+	}
 	L, mod, err := a.newPlugin(ctx)
 	if err != nil {
 		return err
@@ -208,6 +239,9 @@ func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string,
 }
 
 func (a *luaAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
+	if a.man.kind == "kv" {
+		return a.kvFetch(ctx, sourceID)
+	}
 	L, mod, err := a.newPlugin(ctx)
 	if err != nil {
 		return nil, err
@@ -742,10 +776,14 @@ func readLuaManifest(path string) (luaManifest, error) {
 		return luaManifest{}, err
 	}
 	man := luaManifest{
-		id:     lvStr(mod.RawGetString("id")),
-		kind:   lvStr(mod.RawGetString("kind")),
-		glob:   lvStr(mod.RawGetString("glob")),
-		resume: lvStr(mod.RawGetString("resume")),
+		id:      lvStr(mod.RawGetString("id")),
+		kind:    lvStr(mod.RawGetString("kind")),
+		glob:    lvStr(mod.RawGetString("glob")),
+		resume:  lvStr(mod.RawGetString("resume")),
+		source:  lvStr(mod.RawGetString("source")),
+		table:   lvStr(mod.RawGetString("table")),
+		prefix:  lvStr(mod.RawGetString("prefix")),
+		related: lvStr(mod.RawGetString("related")),
 	}
 	if rt, ok := mod.RawGetString("roots").(*lua.LTable); ok {
 		for i := 1; i <= rt.Len(); i++ {
@@ -757,11 +795,23 @@ func readLuaManifest(path string) (luaManifest, error) {
 	if man.id == "" {
 		return man, fmt.Errorf("missing id")
 	}
-	if man.glob == "" {
-		return man, fmt.Errorf("plugin %s: missing glob", man.id)
-	}
-	if man.kind != "line" && man.kind != "file" {
-		return man, fmt.Errorf("plugin %s: kind must be \"line\" or \"file\"", man.id)
+	switch man.kind {
+	case "line", "file":
+		if man.glob == "" {
+			return man, fmt.Errorf("plugin %s: missing glob", man.id)
+		}
+	case "kv":
+		if man.source == "" {
+			return man, fmt.Errorf("plugin %s: kv kind requires source", man.id)
+		}
+		if !validSQLIdent(man.table) {
+			return man, fmt.Errorf("plugin %s: kv kind requires a safe table identifier", man.id)
+		}
+		if man.prefix == "" {
+			return man, fmt.Errorf("plugin %s: kv kind requires prefix", man.id)
+		}
+	default:
+		return man, fmt.Errorf("plugin %s: kind must be \"line\", \"file\", or \"kv\"", man.id)
 	}
 	return man, nil
 }
@@ -797,7 +847,11 @@ func runPluginList() error {
 		if la.Available() {
 			mark = "✓"
 		}
-		fmt.Printf("  %s %-12s %-5s %s\n", mark, la.man.id, la.man.kind, strings.Join(la.expandRoots(), ", "))
+		paths := la.expandRoots()
+		if la.man.kind == "kv" {
+			paths = []string{la.expandKVSource()}
+		}
+		fmt.Printf("  %s %-12s %-5s %s\n", mark, la.man.id, la.man.kind, strings.Join(paths, ", "))
 	}
 	return nil
 }
@@ -856,6 +910,9 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 	}
 	defer L.Close()
 
+	if a.man.kind == "kv" {
+		return nil, nil, fmt.Errorf("plugin %s: kv kind has no sample file (run `recall plugin test %s` without an argument)", a.man.id, a.path)
+	}
 	switch a.man.kind {
 	case "line":
 		p, err := a.callLine(L, mod, sample, 0, 0, "", false)
@@ -885,4 +942,242 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 		}
 		return []Session{s}, m, nil
 	}
+}
+
+// --- kv kind: index a sqlite KV table -------------------------------------
+//
+// Contract recap: the manifest names a sqlite file, a table, a header key
+// prefix, and an optional related-key range template. The host scans header
+// rows in rowid order, runs the related range scan per id, and hands the
+// blobs to session(id, header_value, related_rows, st). Lua sees only
+// strings — same sandbox guarantees as line/file kinds.
+//
+// v1 always does a full rescan. Incremental (rowid-watermarked) resume is a
+// straight-line extension: track MAX(rowid) and re-emit only ids whose header
+// or related rows have advanced. The Go CursorAdapter does that for the
+// canonical cursor source; the Lua port is the proof of contract reach.
+
+func (a *luaAdapter) kvScanStream(ctx context.Context, _ string, emit EmitFunc) error {
+	src := a.expandKVSource()
+	if _, err := os.Stat(src); err != nil {
+		return nil // missing source = empty scan, like a missing root
+	}
+	db, err := sql.Open("sqlite", src+"?mode=ro&immutable=1")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	L, mod, err := a.newPlugin(ctx)
+	if err != nil {
+		return err
+	}
+	defer L.Close()
+
+	be := newBatchEmitter(emit, func() string { return "" }, a.batchSessions)
+
+	hdrLo, hdrHi := keyRange(a.man.prefix)
+	rows, err := db.QueryContext(ctx,
+		`SELECT key, value FROM `+a.man.table+` WHERE key >= ? AND key < ? ORDER BY key`,
+		hdrLo, hdrHi)
+	if err != nil {
+		return err
+	}
+	type hdr struct{ id, val string }
+	var headers []hdr
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		var k string
+		var v []byte
+		if err := rows.Scan(&k, &v); err != nil {
+			rows.Close()
+			return err
+		}
+		headers = append(headers, hdr{id: k[len(a.man.prefix):], val: string(v)})
+	}
+	rows.Close()
+
+	for _, h := range headers {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		related, err := a.kvRelatedRows(ctx, db, h.id)
+		if err != nil {
+			return err
+		}
+		fileCtx, cancel := context.WithTimeout(ctx, luaFileTimeout)
+		L.SetContext(fileCtx)
+		// Don't truncate at scan: the Go CursorAdapter (the parity target) keeps
+		// full text and lets index.go cap it at write. line/file kinds truncate
+		// because their Go counterparts do; kv matches Cursor's no-truncate path.
+		sess, msgs, e := a.callSession(L, mod, h.id, h.val, related, false)
+		cancel()
+		L.SetContext(ctx)
+		if e != nil || sess.SourceID == "" {
+			continue
+		}
+		if err := be.add(sess, msgs); err != nil {
+			return err
+		}
+	}
+	return be.flush()
+}
+
+func (a *luaAdapter) kvFetch(ctx context.Context, sourceID string) ([]Message, error) {
+	src := a.expandKVSource()
+	db, err := sql.Open("sqlite", src+"?mode=ro&immutable=1")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	var hdr []byte
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM `+a.man.table+` WHERE key = ?`,
+		a.man.prefix+sourceID).Scan(&hdr); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", a.man.id, sourceID, err)
+	}
+	related, err := a.kvRelatedRows(ctx, db, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	L, mod, err := a.newPlugin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer L.Close()
+	_, msgs, err := a.callSession(L, mod, sourceID, string(hdr), related, false)
+	return msgs, err
+}
+
+type kvRow struct{ key, value string }
+
+// kvRelatedRows runs the configured related-range scan for one header id and
+// returns rows in storage (rowid) order. Empty `related` template yields no
+// rows — handy for pure 1-row-per-session sources.
+func (a *luaAdapter) kvRelatedRows(ctx context.Context, db *sql.DB, id string) ([]kvRow, error) {
+	if a.man.related == "" {
+		return nil, nil
+	}
+	lo := strings.ReplaceAll(a.man.related, "{id}", id)
+	_, hi := keyRange(lo)
+	rows, err := db.QueryContext(ctx,
+		`SELECT key, value FROM `+a.man.table+` WHERE key >= ? AND key < ? ORDER BY key`,
+		lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []kvRow
+	for rows.Next() {
+		var k string
+		var v []byte
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out = append(out, kvRow{key: k, value: string(v)})
+	}
+	return out, rows.Err()
+}
+
+// callSession invokes the plugin's session(id, header_value, related_rows, st)
+// transform and normalizes the returned (session, messages) pair, mirroring
+// callFile's title/timestamp fallback rules so kv-sourced sessions look like
+// the other kinds in the index.
+func (a *luaAdapter) callSession(L *lua.LState, mod *lua.LTable, id, headerVal string, related []kvRow, truncate bool) (Session, []Message, error) {
+	fn, ok := mod.RawGetString("session").(*lua.LFunction)
+	if !ok {
+		return Session{}, nil, fmt.Errorf("plugin %s: no session() function", a.man.id)
+	}
+	rt := L.NewTable()
+	for i, r := range related {
+		row := L.NewTable()
+		row.RawSetString("key", lua.LString(r.key))
+		row.RawSetString("value", lua.LString(r.value))
+		rt.RawSetInt(i+1, row)
+	}
+	st := L.NewTable()
+	st.RawSetString("id", lua.LString(id))
+
+	if err := L.CallByParam(lua.P{Fn: fn, NRet: 2, Protect: true},
+		lua.LString(id), lua.LString(headerVal), rt, st); err != nil {
+		return Session{}, nil, err
+	}
+	sv := L.Get(-2)
+	mv := L.Get(-1)
+	L.Pop(2)
+
+	sessT, ok := sv.(*lua.LTable)
+	if !ok {
+		return Session{}, nil, nil
+	}
+	sess := Session{
+		Source:    a.man.id,
+		SourceID:  firstNonEmpty(lvStr(sessT.RawGetString("id")), id),
+		Project:   lvStr(sessT.RawGetString("project")),
+		Title:     lvStr(sessT.RawGetString("title")),
+		StartedAt: lvInt(sessT.RawGetString("started_at")),
+		EndedAt:   lvInt(sessT.RawGetString("ended_at")),
+	}
+	msgs := a.tableToMessages(mv, sess.SourceID, truncate)
+	if sess.Title == "" || sess.StartedAt == 0 {
+		var firstUser string
+		for _, m := range msgs {
+			if m.Role == "user" && firstUser == "" && !looksLikeWrapper(m.Text) {
+				firstUser = m.Text
+			}
+			if sess.StartedAt == 0 || (m.TS > 0 && m.TS < sess.StartedAt) {
+				sess.StartedAt = m.TS
+			}
+			if m.TS > sess.EndedAt {
+				sess.EndedAt = m.TS
+			}
+		}
+		if sess.Title == "" {
+			sess.Title = titleFromPrompt(firstUser)
+		}
+	}
+	sess.MsgCount = len(msgs)
+	return sess, msgs, nil
+}
+
+// keyRange returns the half-open [lo, hi) byte range that matches all keys
+// starting with `prefix`. hi is prefix with the last byte incremented; for an
+// empty prefix we use a high sentinel that sorts after any reasonable key.
+func keyRange(prefix string) (string, string) {
+	if prefix == "" {
+		return "", "\uffff"
+	}
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xff {
+			b[i]++
+			return prefix, string(b[:i+1])
+		}
+	}
+	return prefix, prefix + "\uffff"
+}
+
+// validSQLIdent guards the manifest-supplied table name. The manifest is
+// trusted code (it IS the plugin), but the table name flows into a string-
+// concatenated SELECT — restrict it to identifier chars so a careless plugin
+// can't accidentally write SQL through it.
+func validSQLIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }

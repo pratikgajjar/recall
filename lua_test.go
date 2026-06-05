@@ -111,6 +111,87 @@ func TestLuaParityPi(t *testing.T) {
 	assertParity(t, "pi", &PiAdapter{Root: root}, luaAdapterFor(t, "plugins/pi.lua", root))
 }
 
+// TestLuaParityCursor proves the `kind = "kv"` plumbing reaches Cursor's
+// sqlite-backed composers and that cursor.lua reproduces what the Go adapter
+// extracts from the same DB. Project mapping (which the Go adapter reads from
+// workspaceStorage) is intentionally not in v1 of cursor.lua, so we compare
+// every Session field except Project.
+func TestLuaParityCursor(t *testing.T) {
+	userDir := t.TempDir()
+	addCursorComposers(t, userDir,
+		tComposer{
+			id: "c1", name: "", createdAt: 1700000000000,
+			bubbles: []tBubble{
+				{id: "b1", typ: 1, text: "investigate the race condition"},
+				{id: "b2", typ: 2, text: "Looking now."},
+				{id: "b3", typ: 9, text: "[tool] grep result"},
+			},
+		},
+		tComposer{
+			id: "c2", name: "named composer", createdAt: 1700000050000,
+			bubbles: []tBubble{
+				{id: "bA", typ: 1, text: "hello there"},
+			},
+		},
+	)
+	addCursorWorkspace(t, userDir, "ws1", "/work/acme-api", "c1", "c2")
+
+	goAd := &CursorAdapter{UserDir: userDir}
+	db := filepath.Join(userDir, "globalStorage", "state.vscdb")
+	luaAd := luaAdapterForKV(t, "plugins/cursor.lua", db)
+
+	gs, gm, _, err := goAd.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatalf("go scan: %v", err)
+	}
+	ls, lm, _, err := luaAd.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatalf("lua scan: %v", err)
+	}
+	compareSessionsIgnoreProject(t, "cursor", gs, ls)
+	compareMessages(t, "cursor", gm, lm)
+
+	// Fetch round-trips through the same plugin.
+	full, err := luaAd.Fetch(context.Background(), "c1")
+	if err != nil {
+		t.Fatalf("lua fetch: %v", err)
+	}
+	if len(full) != 3 || full[0].Role != "user" || full[1].Role != "assistant" || full[2].Role != "tool" {
+		t.Fatalf("fetch = %+v", full)
+	}
+}
+
+// luaAdapterForKV loads a kv-kind plugin but points its source at a test DB.
+func luaAdapterForKV(t *testing.T, pluginPath, dbPath string) *luaAdapter {
+	t.Helper()
+	man, err := readLuaManifest(pluginPath)
+	if err != nil {
+		t.Fatalf("manifest %s: %v", pluginPath, err)
+	}
+	man.source = dbPath
+	return &luaAdapter{path: pluginPath, man: man, batchSessions: 1}
+}
+
+// compareSessionsIgnoreProject is compareSessions minus the Project field.
+// Used where the Lua port reaches a parity-tested source but its v1 manifest
+// doesn't yet model the auxiliary scan that yields the project path.
+func compareSessionsIgnoreProject(t *testing.T, label string, want, got []Session) {
+	t.Helper()
+	if len(want) != len(got) {
+		t.Fatalf("%s: session count: go=%d lua=%d", label, len(want), len(got))
+	}
+	sortSessions(want)
+	sortSessions(got)
+	for i := range want {
+		w, g := want[i], got[i]
+		if w.Source != g.Source || w.SourceID != g.SourceID ||
+			w.Title != g.Title || w.StartedAt != g.StartedAt || w.EndedAt != g.EndedAt ||
+			w.MsgCount != g.MsgCount || w.Append != g.Append {
+			t.Errorf("%s: session mismatch:\n  go  = %+v\n  lua = %+v", label, w, g)
+		}
+	}
+}
+
 // TestLuaParityClaudeArrayToolResult guards the real-world case (found by
 // `recall plugin test` on a live transcript) where tool_result content is an
 // array, not a string. The Go adapter skips it; the Lua plugin must too.
