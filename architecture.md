@@ -109,6 +109,12 @@ and messages — including the offset-resume / append path. `TestLuaSandbox` pro
 `os`/`io`/`require`/`load` are unavailable. So the plugin model is provably
 capable of everything the built-ins do.
 
+Running `recall plugin test plugins/claude.lua` against a *real* transcript also
+surfaced a latent bug in the built-in Go adapter: a `tool_result` with array
+content (common in real data) failed to unmarshal and silently dropped the whole
+message. Both the Go adapter and the Lua plugin now tolerate string-or-array
+content (`TestLuaParityClaudeArrayToolResult`).
+
 ## Performance
 
 - Built-ins stay in Go; Lua runs only for opt-in plugins, on far smaller data.
@@ -123,6 +129,28 @@ capable of everything the built-ins do.
 
 Drop a `.lua` file in `~/.recall/plugins/`. `recall doctor` lists it and whether
 its roots exist; `recall index` picks it up. No fork, no recompile.
+
+Authoring loop:
+
+```
+recall plugin list                       # discovered plugins, kind, roots, availability
+recall plugin test <plugin.lua> [sample] # dry-run: print the records it produces
+```
+
+`plugin test` against a real file is the tight loop — it parses one file
+(bypassing roots/glob) and prints the sessions/messages, so you see exactly what
+will be indexed before committing to a full scan.
+
+## A note on SQLite sources (Cursor/Windsurf)
+
+These keep history in `state.vscdb` (SQLite KV blobs), not files. The Lua tier is
+for `line`/`file` sources: a per-record Lua call across Cursor's ~245k blobs
+would wreck the full-index time that `autoresearch.md` treats as the primary
+metric. So **SQLite-backed sources stay host-owned Go adapters** — this is the
+"I/O is the host's job" boundary, not a gap. The natural extension is a host
+`vscdb` connector kind that does the SQLite iteration in Go and calls a Lua
+transform only per *session blob* (not per message), which would add Windsurf/Cody
+as pure-Lua plugins without the per-bubble cost.
 
 ## What's next
 

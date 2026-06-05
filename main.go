@@ -108,6 +108,10 @@ func main() {
 		if err := runMCP(args); err != nil {
 			fatal(err)
 		}
+	case "plugin":
+		if err := runPlugin(args); err != nil {
+			fatal(err)
+		}
 	default:
 
 		if err := runFind(os.Args[1:]); err != nil {

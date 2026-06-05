@@ -213,10 +213,52 @@ func (b *ClaudeMessageBody) UnmarshalJSON(data []byte) error {
 }
 
 type ClaudePart struct {
-	Type    string `json:"type"`
-	Text    string `json:"text"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
+	Type    string        `json:"type"`
+	Text    string        `json:"text"`
+	Name    string        `json:"name"`
+	Content claudeContent `json:"content"`
+}
+
+// claudeContent tolerates tool_result content that is a string, an array of
+// parts, or an object. Real transcripts use the array form; without this the
+// whole line fails to unmarshal and the message is dropped entirely.
+type claudeContent struct{ s string }
+
+func (c *claudeContent) UnmarshalJSON(data []byte) error {
+	for i, ch := range data {
+		switch ch {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '"':
+			return JSONUnmarshal(data[i:], &c.s)
+		case '[':
+			var parts []ClaudePart
+			if err := JSONUnmarshal(data[i:], &parts); err != nil {
+				return err
+			}
+			var b strings.Builder
+			for _, p := range parts {
+				if p.Text == "" {
+					continue
+				}
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(p.Text)
+			}
+			c.s = b.String()
+			return nil
+		case '{':
+			var o struct {
+				Text string `json:"text"`
+			}
+			_ = JSONUnmarshal(data[i:], &o)
+			c.s = o.Text
+			return nil
+		}
+		break
+	}
+	return nil
 }
 
 func (m ClaudeMessage) Text() string {
@@ -248,10 +290,10 @@ func (m ClaudeMessage) Text() string {
 			b.WriteString(p.Name)
 			b.WriteByte(']')
 		case "tool_result":
-			if p.Content == "" {
+			if p.Content.s == "" {
 				continue
 			}
-			t := p.Content
+			t := p.Content.s
 			if len(t) > 400 {
 				t = t[:400]
 			}

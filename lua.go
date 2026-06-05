@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -763,4 +764,125 @@ func readLuaManifest(path string) (luaManifest, error) {
 		return man, fmt.Errorf("plugin %s: kind must be \"line\" or \"file\"", man.id)
 	}
 	return man, nil
+}
+
+// --- `recall plugin` CLI: the authoring loop -------------------------------
+
+func runPlugin(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: recall plugin <list|test> ...")
+	}
+	switch args[0] {
+	case "list":
+		return runPluginList()
+	case "test":
+		return runPluginTest(args[1:])
+	default:
+		return fmt.Errorf("unknown plugin subcommand %q (want: list, test)", args[0])
+	}
+}
+
+func runPluginList() error {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".recall", "plugins")
+	ads := discoverLuaAdapters(dir)
+	if len(ads) == 0 {
+		fmt.Printf("no plugins in %s\n", dir)
+		return nil
+	}
+	fmt.Printf("plugins in %s:\n", dir)
+	for _, a := range ads {
+		la := a.(*luaAdapter)
+		mark := "✗"
+		if la.Available() {
+			mark = "✓"
+		}
+		fmt.Printf("  %s %-12s %-5s %s\n", mark, la.man.id, la.man.kind, strings.Join(la.expandRoots(), ", "))
+	}
+	return nil
+}
+
+// runPluginTest dry-runs a plugin so authors see exactly what records it
+// produces. With a sample file it parses just that file (bypassing roots/glob);
+// otherwise it scans the plugin's declared roots.
+func runPluginTest(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: recall plugin test <plugin.lua> [sample-file]")
+	}
+	path := args[0]
+	man, err := readLuaManifest(path)
+	if err != nil {
+		return err
+	}
+	ad := &luaAdapter{path: path, man: man, batchSessions: 1}
+
+	var sessions []Session
+	var msgs []Message
+	if len(args) >= 2 {
+		sessions, msgs, err = ad.testSample(args[1])
+	} else {
+		sessions, msgs, _, err = ad.Scan(context.Background(), "")
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("plugin %s (%s) → %d session(s), %d message(s)\n", man.id, man.kind, len(sessions), len(msgs))
+	for _, s := range sessions {
+		fmt.Printf("\nsession %s\n  project=%s\n  title=%s\n  msgs=%d  started_ms=%d\n",
+			s.SourceID, s.Project, s.Title, s.MsgCount, s.StartedAt)
+	}
+	fmt.Println()
+	for i, m := range msgs {
+		if i >= 12 {
+			fmt.Printf("  … and %d more\n", len(msgs)-12)
+			break
+		}
+		t := m.Text
+		if len(t) > 100 {
+			t = t[:100]
+		}
+		fmt.Printf("  [%d] %-9s %s\n", m.Idx, m.Role, strings.ReplaceAll(t, "\n", " "))
+	}
+	return nil
+}
+
+// testSample parses one file through the plugin, regardless of roots/glob — the
+// fast path for iterating on a transform.
+func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
+	L, mod, err := a.newPlugin(context.Background())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer L.Close()
+
+	switch a.man.kind {
+	case "line":
+		p, err := a.callLine(L, mod, sample, 0, 0, "", false)
+		if err != nil {
+			return nil, nil, err
+		}
+		var sessions []Session
+		if p.sessID != "" {
+			title := p.title
+			if title == "" {
+				title = titleFromPrompt(p.firstUser)
+			}
+			sessions = []Session{{
+				Source: a.man.id, SourceID: p.sessID, Project: p.project,
+				Title: title, StartedAt: p.startedAt, EndedAt: p.endedAt, MsgCount: len(p.msgs),
+			}}
+		}
+		return sessions, p.msgs, nil
+	default: // "file"
+		data, err := os.ReadFile(sample)
+		if err != nil {
+			return nil, nil, err
+		}
+		s, m, err := a.callFile(L, mod, sample, data, 0, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []Session{s}, m, nil
+	}
 }

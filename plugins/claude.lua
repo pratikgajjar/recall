@@ -12,8 +12,22 @@ local function flatten(c)
       out[#out + 1] = p.text
     elseif p.type == "tool_use" and p.name and p.name ~= "" then
       out[#out + 1] = "[tool_use:" .. p.name .. "]"
-    elseif p.type == "tool_result" and p.content and p.content ~= "" then
-      out[#out + 1] = "[tool_result] " .. recall.truncate(p.content, 400)
+    elseif p.type == "tool_result" then
+      -- content is a string, or an array of parts (real transcripts use both);
+      -- join the array's text, matching the Go adapter.
+      local s = ""
+      if type(p.content) == "string" then
+        s = p.content
+      elseif type(p.content) == "table" then
+        local inner = {}
+        for _, q in ipairs(p.content) do
+          if q.text and q.text ~= "" then inner[#inner + 1] = q.text end
+        end
+        s = table.concat(inner, "\n")
+      end
+      if s ~= "" then
+        out[#out + 1] = "[tool_result] " .. recall.truncate(s, 400)
+      end
     end
   end
   return table.concat(out, "\n")

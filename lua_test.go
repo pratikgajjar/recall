@@ -111,6 +111,19 @@ func TestLuaParityPi(t *testing.T) {
 	assertParity(t, "pi", &PiAdapter{Root: root}, luaAdapterFor(t, "plugins/pi.lua", root))
 }
 
+// TestLuaParityClaudeArrayToolResult guards the real-world case (found by
+// `recall plugin test` on a live transcript) where tool_result content is an
+// array, not a string. The Go adapter skips it; the Lua plugin must too.
+func TestLuaParityClaudeArrayToolResult(t *testing.T) {
+	root := t.TempDir()
+	raw := `{"type":"assistant","timestamp":"2026-05-01T10:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"done"},{"type":"tool_result","content":[{"type":"text","text":"ignored array"}]}]}}`
+	writeLines(t, filepath.Join(root, "-work-x", "sess-arr.jsonl"),
+		claudeUser("run it", "2026-05-01T10:00:00Z", "/work/x"),
+		raw,
+	)
+	assertParity(t, "claude-array-toolresult", &ClaudeAdapter{Root: root}, luaAdapterFor(t, "plugins/claude.lua", root))
+}
+
 // TestLuaParityClaudeIncremental proves the offset-resume / append path matches
 // too — the hard part the Go adapters get right.
 func TestLuaParityClaudeIncremental(t *testing.T) {
@@ -253,6 +266,47 @@ func TestLuaRunawayPluginSkipped(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Fatalf("runaway plugin should yield no sessions, got %d", len(sessions))
+	}
+}
+
+// TestPluginTestSample exercises the `recall plugin test <file> <sample>`
+// dry-run path for both kinds.
+func TestPluginTestSample(t *testing.T) {
+	root := t.TempDir()
+
+	// line kind
+	jsonl := filepath.Join(root, "s.jsonl")
+	writeLines(t, jsonl,
+		claudeUser("hello sample", "2026-05-01T10:00:00Z", "/work/x"),
+		claudeAssistant("hi", "2026-05-01T10:00:05Z"),
+	)
+	man, err := readLuaManifest("plugins/claude.lua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad := &luaAdapter{path: "plugins/claude.lua", man: man}
+	ss, mm, err := ad.testSample(jsonl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss) != 1 || ss[0].SourceID != "s" || len(mm) != 2 {
+		t.Fatalf("line sample = %+v / %+v", ss, mm)
+	}
+
+	// file kind
+	md := filepath.Join(root, "note.md")
+	writeLines(t, md, "# Title", "body text here")
+	man2, err := readLuaManifest("plugins/obsidian.lua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad2 := &luaAdapter{path: "plugins/obsidian.lua", man: man2}
+	ss2, mm2, err := ad2.testSample(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss2) != 1 || ss2[0].Title != "Title" || len(mm2) != 1 || mm2[0].Role != "note" {
+		t.Fatalf("file sample = %+v / %+v", ss2, mm2)
 	}
 }
 
