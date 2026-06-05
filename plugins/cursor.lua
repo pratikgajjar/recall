@@ -56,6 +56,8 @@ return {
   table   = "cursorDiskKV",
   prefix  = "composerData:",
   related = "bubbleId:{id}:",
+  watermark = "rowid", -- incremental resume: only re-emit composers whose
+                       -- composerData or bubble rows advanced past last pass
   resume  = "cursor://anysphere.cursor-deeplink/composer/{id}",
 
   session = function(id, header_value, related_rows, st)

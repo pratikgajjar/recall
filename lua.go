@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,13 @@ type luaManifest struct {
 	table   string // sqlite table name (sanitized identifier)
 	prefix  string // header key prefix; id = key[len(prefix):]
 	related string // optional related-rows range template, {id} substituted
+
+	// watermark names an INTEGER column on `table` whose values increase as
+	// rows are inserted/updated (rowid is the canonical example). When set,
+	// the kv scanner stores MAX(watermark) as the resume checkpoint and on
+	// the next pass re-emits only sessions whose header or related rows have
+	// advanced past that value. Empty (default) = full rescan every pass.
+	watermark string
 }
 
 func (a *luaAdapter) ID() string { return a.man.id }
@@ -784,14 +792,15 @@ func readLuaManifest(path string) (luaManifest, error) {
 		return luaManifest{}, err
 	}
 	man := luaManifest{
-		id:      lvStr(mod.RawGetString("id")),
-		kind:    lvStr(mod.RawGetString("kind")),
-		glob:    lvStr(mod.RawGetString("glob")),
-		resume:  lvStr(mod.RawGetString("resume")),
-		source:  lvStr(mod.RawGetString("source")),
-		table:   lvStr(mod.RawGetString("table")),
-		prefix:  lvStr(mod.RawGetString("prefix")),
-		related: lvStr(mod.RawGetString("related")),
+		id:        lvStr(mod.RawGetString("id")),
+		kind:      lvStr(mod.RawGetString("kind")),
+		glob:      lvStr(mod.RawGetString("glob")),
+		resume:    lvStr(mod.RawGetString("resume")),
+		source:    lvStr(mod.RawGetString("source")),
+		table:     lvStr(mod.RawGetString("table")),
+		prefix:    lvStr(mod.RawGetString("prefix")),
+		related:   lvStr(mod.RawGetString("related")),
+		watermark: lvStr(mod.RawGetString("watermark")),
 	}
 	if rt, ok := mod.RawGetString("roots").(*lua.LTable); ok {
 		for i := 1; i <= rt.Len(); i++ {
@@ -817,6 +826,9 @@ func readLuaManifest(path string) (luaManifest, error) {
 		}
 		if man.prefix == "" {
 			return man, fmt.Errorf("plugin %s: kv kind requires prefix", man.id)
+		}
+		if man.watermark != "" && !validSQLIdent(man.watermark) {
+			return man, fmt.Errorf("plugin %s: kv watermark must be a safe column identifier", man.id)
 		}
 	default:
 		return man, fmt.Errorf("plugin %s: kind must be \"line\", \"file\", or \"kv\"", man.id)
@@ -965,7 +977,7 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 // or related rows have advanced. The Go CursorAdapter does that for the
 // canonical cursor source; the Lua port is the proof of contract reach.
 
-func (a *luaAdapter) kvScanStream(ctx context.Context, _ string, emit EmitFunc) error {
+func (a *luaAdapter) kvScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	src := a.expandKVSource()
 	if _, err := os.Stat(src); err != nil {
 		return nil // missing source = empty scan, like a missing root
@@ -982,61 +994,230 @@ func (a *luaAdapter) kvScanStream(ctx context.Context, _ string, emit EmitFunc) 
 	}
 	defer L.Close()
 
-	be := newBatchEmitter(emit, func() string { return "" }, a.batchSessions)
+	// Watermark drives incremental resume: store MAX(watermark) at the start
+	// of a pass and advance the checkpoint to it only once the whole pass
+	// completes. Intermediate batch flushes keep the OLD checkpoint, so a
+	// mid-pass crash re-runs the pass from the prior watermark (idempotent
+	// upsert absorbs the redo) rather than skipping un-emitted sessions.
+	hasWM := a.man.watermark != ""
+	prevWM := parseKVCkpt(prev)
+	ckptVal := prev
+	if !hasWM {
+		ckptVal = ""
+	}
+	be := newBatchEmitter(emit, func() string { return ckptVal }, a.batchSessions)
 
-	hdrLo, hdrHi := keyRange(a.man.prefix)
-	rows, err := db.QueryContext(ctx,
-		`SELECT key, value FROM `+a.man.table+` WHERE key >= ? AND key < ? ORDER BY key`,
-		hdrLo, hdrHi)
-	if err != nil {
-		return err
-	}
-	type hdr struct{ id, val string }
-	var headers []hdr
-	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			rows.Close()
+	var curMax int64
+	if hasWM {
+		if curMax, err = a.kvMaxWatermark(ctx, db); err != nil {
 			return err
 		}
-		var k string
-		var v []byte
-		if err := rows.Scan(&k, &v); err != nil {
-			rows.Close()
-			return err
-		}
-		headers = append(headers, hdr{id: k[len(a.man.prefix):], val: string(v)})
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
 
-	for _, h := range headers {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		related, err := a.kvRelatedRows(ctx, db, h.id)
+	process := func(id, val string) error {
+		related, err := a.kvRelatedRows(ctx, db, id)
 		if err != nil {
 			return err
 		}
 		fileCtx, cancel := context.WithTimeout(ctx, luaFileTimeout)
 		L.SetContext(fileCtx)
 		// Don't truncate at scan: the Go CursorAdapter (the parity target) keeps
-		// full text and lets index.go cap it at write. line/file kinds truncate
+		// full text and lets index.go cap at write. line/file kinds truncate
 		// because their Go counterparts do; kv matches Cursor's no-truncate path.
-		sess, msgs, e := a.callSession(L, mod, h.id, h.val, related, false)
+		sess, msgs, e := a.callSession(L, mod, id, val, related, false)
 		cancel()
 		L.SetContext(ctx)
 		if e != nil || sess.SourceID == "" {
-			continue
+			return nil
 		}
-		if err := be.add(sess, msgs); err != nil {
+		return be.add(sess, msgs)
+	}
+
+	if hasWM && prevWM > 0 {
+		// Incremental: re-emit only sessions whose header or related rows
+		// advanced past the last watermark.
+		ids, err := a.kvTouchedIDs(ctx, db, prevWM)
+		if err != nil {
 			return err
 		}
+		for _, id := range ids {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			val, ok, err := a.kvHeaderValue(ctx, db, id)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue // header deleted; nothing to re-index
+			}
+			if err := process(id, val); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Full pass: every header row in key order.
+		hdrLo, hdrHi := keyRange(a.man.prefix)
+		rows, err := db.QueryContext(ctx,
+			`SELECT key, value FROM `+a.man.table+` WHERE key >= ? AND key < ? ORDER BY key`,
+			hdrLo, hdrHi)
+		if err != nil {
+			return err
+		}
+		type hdr struct{ id, val string }
+		var headers []hdr
+		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			var k string
+			var v []byte
+			if err := rows.Scan(&k, &v); err != nil {
+				rows.Close()
+				return err
+			}
+			headers = append(headers, hdr{id: k[len(a.man.prefix):], val: string(v)})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+
+		for _, h := range headers {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := process(h.id, h.val); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Pass completed cleanly: advance the checkpoint so the final flush
+	// persists it. (No-op for the no-watermark full-rescan mode.)
+	if hasWM {
+		ckptVal = encodeKVCkpt(curMax)
 	}
 	return be.flush()
 }
+
+// kvMaxWatermark reads MAX(watermark) from the table; 0 when the table is
+// empty. Bound as int64 so SQLite compares numerically, not lexically.
+func (a *luaAdapter) kvMaxWatermark(ctx context.Context, db *sql.DB) (int64, error) {
+	var n sql.NullInt64
+	if err := db.QueryRowContext(ctx,
+		`SELECT MAX(`+a.man.watermark+`) FROM `+a.man.table).Scan(&n); err != nil {
+		return 0, err
+	}
+	if !n.Valid {
+		return 0, nil
+	}
+	return n.Int64, nil
+}
+
+// kvHeaderValue fetches one header row's value by id.
+func (a *luaAdapter) kvHeaderValue(ctx context.Context, db *sql.DB, id string) (string, bool, error) {
+	var v []byte
+	err := db.QueryRowContext(ctx,
+		`SELECT value FROM `+a.man.table+` WHERE key = ?`, a.man.prefix+id).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(v), true, nil
+}
+
+// kvTouchedIDs returns the set of header ids whose header row or related rows
+// have a watermark greater than prev. Mirrors cursor.go's collectTouchedComposers
+// but derives the key ranges from the manifest's prefix/related templates.
+func (a *luaAdapter) kvTouchedIDs(ctx context.Context, db *sql.DB, prev int64) ([]string, error) {
+	hdrLo, hdrHi := keyRange(a.man.prefix)
+	relPre, relSuf := a.relatedPrefixSuffix()
+
+	var rows *sql.Rows
+	var err error
+	if relPre != "" {
+		relLo, relHi := keyRange(relPre)
+		rows, err = db.QueryContext(ctx,
+			`SELECT key FROM `+a.man.table+` WHERE `+a.man.watermark+` > ? AND `+
+				`((key >= ? AND key < ?) OR (key >= ? AND key < ?))`,
+			prev, hdrLo, hdrHi, relLo, relHi)
+	} else {
+		rows, err = db.QueryContext(ctx,
+			`SELECT key FROM `+a.man.table+` WHERE `+a.man.watermark+` > ? AND key >= ? AND key < ?`,
+			prev, hdrLo, hdrHi)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		switch {
+		case strings.HasPrefix(k, a.man.prefix):
+			seen[k[len(a.man.prefix):]] = true
+		case relPre != "" && strings.HasPrefix(k, relPre):
+			if id, ok := idFromRelatedKey(k, relPre, relSuf); ok {
+				seen[id] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out) // deterministic order
+	return out, nil
+}
+
+// relatedPrefixSuffix splits the related template around {id}. For
+// "bubbleId:{id}:" it returns ("bubbleId:", ":"). Empty template => empty
+// prefix (no related scan).
+func (a *luaAdapter) relatedPrefixSuffix() (string, string) {
+	if a.man.related == "" {
+		return "", ""
+	}
+	if i := strings.Index(a.man.related, "{id}"); i >= 0 {
+		return a.man.related[:i], a.man.related[i+len("{id}"):]
+	}
+	return a.man.related, ""
+}
+
+// idFromRelatedKey recovers the header id embedded in a related key, given the
+// template's prefix/suffix around {id}. "bubbleId:c1:b2" with ("bubbleId:",
+// ":") yields "c1".
+func idFromRelatedKey(key, relPre, relSuf string) (string, bool) {
+	if !strings.HasPrefix(key, relPre) {
+		return "", false
+	}
+	rest := key[len(relPre):]
+	if relSuf == "" {
+		return rest, true
+	}
+	if i := strings.Index(rest, relSuf); i >= 0 {
+		return rest[:i], true
+	}
+	return "", false
+}
+
+func parseKVCkpt(s string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	return n
+}
+
+func encodeKVCkpt(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (a *luaAdapter) kvFetch(ctx context.Context, sourceID string) ([]Message, error) {
 	src := a.expandKVSource()

@@ -111,6 +111,87 @@ func TestLuaParityPi(t *testing.T) {
 	assertParity(t, "pi", &PiAdapter{Root: root}, luaAdapterFor(t, "plugins/pi.lua", root))
 }
 
+// TestLuaCursorKVIncremental exercises the watermark-driven resume path of the
+// kv kind: a first pass indexes everything, a no-op pass re-emits nothing, and
+// after a new composer lands (higher rowid) only that composer comes back.
+// Mirrors the Go adapter's TestCursorIncrementalByRowID.
+func TestLuaCursorKVIncremental(t *testing.T) {
+	userDir := t.TempDir()
+	addCursorComposers(t, userDir, tComposer{
+		id: "c1", createdAt: 1700000000000,
+		bubbles: []tBubble{{id: "b1", typ: 1, text: "first chat"}},
+	})
+	db := filepath.Join(userDir, "globalStorage", "state.vscdb")
+	ad := luaAdapterForKV(t, "plugins/cursor.lua", db)
+
+	// First pass: index c1, get a non-empty checkpoint.
+	s1, m1, next, err := ad.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s1) != 1 || len(m1) != 1 || s1[0].SourceID != "c1" {
+		t.Fatalf("first pass: sessions=%+v msgs=%+v", s1, m1)
+	}
+	if next == "" {
+		t.Fatal("watermark kind must emit a non-empty checkpoint")
+	}
+
+	// No-op pass: nothing changed, so nothing re-emitted.
+	s0, _, next0, err := ad.Scan(context.Background(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s0) != 0 {
+		t.Fatalf("no-op resume should yield 0 sessions, got %d", len(s0))
+	}
+
+	// A new composer appears with a higher rowid.
+	addCursorComposers(t, userDir, tComposer{
+		id: "c2", createdAt: 1700000100000,
+		bubbles: []tBubble{{id: "b9", typ: 1, text: "second chat"}},
+	})
+	s2, m2, _, err := ad.Scan(context.Background(), next0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s2) != 1 || s2[0].SourceID != "c2" || len(m2) != 1 || m2[0].Text != "second chat" {
+		t.Fatalf("incremental pass should return only c2, got sessions=%+v msgs=%+v", s2, m2)
+	}
+}
+
+// TestLuaCursorKVResumeAfterEditedComposer proves that touching an existing
+// composer's bubble (new bubble row → higher rowid) re-emits that whole
+// composer on the next pass, so edits aren't missed.
+func TestLuaCursorKVResumeAfterEditedComposer(t *testing.T) {
+	userDir := t.TempDir()
+	addCursorComposers(t, userDir, tComposer{
+		id: "c1", createdAt: 1700000000000,
+		bubbles: []tBubble{{id: "b1", typ: 1, text: "original"}},
+	})
+	db := filepath.Join(userDir, "globalStorage", "state.vscdb")
+	ad := luaAdapterForKV(t, "plugins/cursor.lua", db)
+
+	_, _, next, err := ad.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append a second bubble to the SAME composer (a higher rowid in the table).
+	addCursorBubble(t, userDir, "c1", tBubble{id: "b2", typ: 2, text: "a reply"})
+	s, m, _, err := ad.Scan(context.Background(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s) != 1 || s[0].SourceID != "c1" {
+		t.Fatalf("edited composer should re-emit c1, got %+v", s)
+	}
+	// The re-emitted composer carries its full message set (not just the delta),
+	// since kv sessions are whole-session replaces, not appends.
+	if len(m) != 2 {
+		t.Fatalf("re-emit should carry all 2 bubbles, got %d", len(m))
+	}
+}
+
 // TestLuaParityCursor proves the `kind = "kv"` plumbing reaches Cursor's
 // sqlite-backed composers and that cursor.lua reproduces what the Go adapter
 // extracts from the same DB. Project mapping (which the Go adapter reads from
