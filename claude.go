@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -205,7 +206,25 @@ func (b *ClaudeMessageBody) UnmarshalJSON(data []byte) error {
 		case '"':
 			return JSONUnmarshal(data[i:], &b.str)
 		case '[':
-			return JSONUnmarshal(data[i:], &b.parts)
+			if JSONUnmarshal(data[i:], &b.parts) == nil {
+				return nil
+			}
+			// A part's content is an array/object, not a string, which fails the
+			// strict decode above. Re-decode loosely and flatten that content so
+			// the message isn't dropped. Only these (otherwise-lost) lines pay
+			// the extra pass; the common case stays on the fast path above.
+			var loose []claudeLoosePart
+			if err := JSONUnmarshal(data[i:], &loose); err != nil {
+				return err
+			}
+			b.parts = make([]ClaudePart, len(loose))
+			for k, lp := range loose {
+				b.parts[k] = ClaudePart{
+					Type: lp.Type, Text: lp.Text, Name: lp.Name,
+					Content: flattenClaudeContent(lp.Content),
+				}
+			}
+			return nil
 		}
 		break
 	}
@@ -213,28 +232,40 @@ func (b *ClaudeMessageBody) UnmarshalJSON(data []byte) error {
 }
 
 type ClaudePart struct {
-	Type    string        `json:"type"`
-	Text    string        `json:"text"`
-	Name    string        `json:"name"`
-	Content claudeContent `json:"content"`
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
-// claudeContent tolerates tool_result content that is a string, an array of
-// parts, or an object. Real transcripts use the array form; without this the
-// whole line fails to unmarshal and the message is dropped entirely.
-type claudeContent struct{ s string }
+// claudeLoosePart mirrors ClaudePart but captures content as raw bytes. Used
+// only on the fallback decode path (see ClaudeMessageBody.UnmarshalJSON) when a
+// part's content is an array/object rather than a string.
+type claudeLoosePart struct {
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Name    string          `json:"name"`
+	Content json.RawMessage `json:"content"`
+}
 
-func (c *claudeContent) UnmarshalJSON(data []byte) error {
-	for i, ch := range data {
+// flattenClaudeContent turns a tool_result's content — a string, an array of
+// {text} parts, or an object — into plain text. Only invoked on the fallback
+// path, so the common (string-content) case never reaches it.
+func flattenClaudeContent(raw json.RawMessage) string {
+	for i, ch := range raw {
 		switch ch {
 		case ' ', '\t', '\n', '\r':
 			continue
 		case '"':
-			return JSONUnmarshal(data[i:], &c.s)
+			var s string
+			_ = JSONUnmarshal(raw[i:], &s)
+			return s
 		case '[':
-			var parts []ClaudePart
-			if err := JSONUnmarshal(data[i:], &parts); err != nil {
-				return err
+			var parts []struct {
+				Text string `json:"text"`
+			}
+			if JSONUnmarshal(raw[i:], &parts) != nil {
+				return ""
 			}
 			var b strings.Builder
 			for _, p := range parts {
@@ -246,19 +277,17 @@ func (c *claudeContent) UnmarshalJSON(data []byte) error {
 				}
 				b.WriteString(p.Text)
 			}
-			c.s = b.String()
-			return nil
+			return b.String()
 		case '{':
 			var o struct {
 				Text string `json:"text"`
 			}
-			_ = JSONUnmarshal(data[i:], &o)
-			c.s = o.Text
-			return nil
+			_ = JSONUnmarshal(raw[i:], &o)
+			return o.Text
 		}
 		break
 	}
-	return nil
+	return ""
 }
 
 func (m ClaudeMessage) Text() string {
@@ -290,10 +319,10 @@ func (m ClaudeMessage) Text() string {
 			b.WriteString(p.Name)
 			b.WriteByte(']')
 		case "tool_result":
-			if p.Content.s == "" {
+			if p.Content == "" {
 				continue
 			}
-			t := p.Content.s
+			t := p.Content
 			if len(t) > 400 {
 				t = t[:400]
 			}
