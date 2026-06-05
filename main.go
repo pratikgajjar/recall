@@ -128,12 +128,16 @@ func defaultIndexPath() string {
 
 func defaultAdapters() []Adapter {
 	home, _ := os.UserHomeDir()
-	return []Adapter{
+	ads := []Adapter{
 		&CursorAdapter{UserDir: filepath.Join(home, "Library", "Application Support", "Cursor", "User")},
 		&ClaudeAdapter{Root: filepath.Join(home, ".claude", "projects")},
 		&CodexAdapter{Root: filepath.Join(home, ".codex", "sessions")},
 		&PiAdapter{Root: filepath.Join(home, ".pi", "agent", "sessions")},
 	}
+	// User-supplied Lua plugins extend the set without recompiling: each defines
+	// in Lua what records to extract; Go indexes them like any other source.
+	ads = append(ads, discoverLuaAdapters(filepath.Join(home, ".recall", "plugins"))...)
+	return ads
 }
 
 type commonFlags struct {
@@ -385,6 +389,8 @@ func adapterPath(a Adapter) string {
 		return v.Root
 	case *PiAdapter:
 		return v.Root
+	case *luaAdapter:
+		return v.path
 	}
 	return ""
 }
