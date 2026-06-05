@@ -74,11 +74,16 @@ return {
 
   -- kind="file": called once per file. Return a session table and messages.
   file = function(doc) ... return session, messages end,
+
+  -- kind="kv": called once per session row from a SQLite KV table (see below).
+  session = function(id, header_value, related_rows, st) ... return session, messages end,
 }
 ```
 
 `st` (line) is seeded with `path/name/basename/dir`; set `st.id`, `st.project`,
 `st.title`, `st.started_at`. `doc` (file) carries `text/path/dir/name/basename/mtime`.
+The three kinds — `line` (JSONL, offset-resumable), `file` (whole-file), and `kv`
+(SQLite key/value) — all return the same `Session`/`Message` shape.
 
 ### recall.* helpers (the entire host API)
 
@@ -141,23 +146,46 @@ recall plugin test <plugin.lua> [sample] # dry-run: print the records it produce
 (bypassing roots/glob) and prints the sessions/messages, so you see exactly what
 will be indexed before committing to a full scan.
 
-## A note on SQLite sources (Cursor/Windsurf)
+## SQLite-backed sources: the `kv` kind
 
-These keep history in `state.vscdb` (SQLite KV blobs), not files. The Lua tier is
-for `line`/`file` sources: a per-record Lua call across Cursor's ~245k blobs
-would wreck the full-index time that `autoresearch.md` treats as the primary
-metric. So **SQLite-backed sources stay host-owned Go adapters** — this is the
-"I/O is the host's job" boundary, not a gap. The natural extension is a host
-`vscdb` connector kind that does the SQLite iteration in Go and calls a Lua
-transform only per *session blob* (not per message), which would add Windsurf/Cody
-as pure-Lua plugins without the per-bubble cost.
+Cursor/Windsurf keep history in `state.vscdb` (a SQLite key/value table), not
+files. The `kind = "kv"` engine handles them with the same I/O-in-Go /
+logic-in-Lua split: the host opens the DB read-only, scans header rows by key
+prefix, runs an optional per-id related-key range scan, and hands
+`(id, header_value, related_rows)` to a Lua `session(...)` transform — one call
+per *session*, never per message, so the per-blob cost that would wreck the
+index-time metric never lands on Lua.
+
+```lua
+return {
+  id = "cursor", kind = "kv",
+  source = "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+  table = "cursorDiskKV",        -- validated as a SQL identifier
+  prefix = "composerData:",      -- header rows; id = key after the prefix
+  related = "bubbleId:{id}:",    -- optional per-id range scan ({id} substituted)
+  resume = "cursor://…/{id}",
+  session = function(id, header_value, related_rows, st) ... return session, messages end,
+}
+```
+
+`plugins/cursor.lua` is the proof-of-reach, parity-checked against the built-in
+`cursor.go` (`TestLuaParityCursor`, plus an env-gated live test). **The built-in
+`cursor.go` stays the default** and remains the full-fidelity path: `cursor.lua`
+v1 deliberately omits two things `cursor.go` does — `workspaceStorage → project`
+mapping (a second I/O source the single-DB manifest doesn't model) and
+rowid-watermarked incremental scan (v1 full-rescans, emitting an empty
+checkpoint). Because a plugin **overrides** a built-in of the same id, dropping
+`cursor.lua` into your plugins dir trades those away — fine for experimenting,
+not yet a replacement for `cursor.go`.
 
 ## What's next
 
-- **SQLite/vscdb connectors** as additional host I/O kinds (Cursor/Windsurf are
-  SQLite, not files), with the per-row/blob transform still in Lua.
-- `recall plugin new/test` for a tighter authoring loop, and `plugin add <repo>`
-  to share plugins.
+- **`kv` incremental + multi-source.** Give `kv` a rowid watermark (like
+  `cursor.go`) so it stops full-rescanning, and a way to declare an auxiliary
+  scan so `cursor.lua` can resolve `workspaceStorage → project` — the two gaps
+  that keep `cursor.go` the default.
+- **Windsurf/Cody** as `kv` plugins (same `state.vscdb` shape).
+- `recall plugin new` / `plugin add <repo>` for authoring and sharing.
 - Host-mediated fetch for authenticated remote sources (the host does the network
   from a declared, approved manifest entry and hands bytes to a `file` plugin —
   the wire never enters Lua).
