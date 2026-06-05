@@ -327,6 +327,14 @@ func (a *luaAdapter) callFile(L *lua.LState, mod *lua.LTable, path string, data 
 		EndedAt:   lvInt(st.RawGetString("ended_at")),
 	}
 	msgs := a.tableToMessages(mv, sess.SourceID, truncate)
+	return deriveSessionMeta(sess, msgs), msgs, nil
+}
+
+// deriveSessionMeta fills the fields a plugin can omit: when Title or StartedAt
+// is unset, take the title from the first non-wrapper user prompt and
+// started/ended from the min/max message timestamp. MsgCount is always set from
+// the messages. Shared by every kind so sessions look identical in the index.
+func deriveSessionMeta(sess Session, msgs []Message) Session {
 	if sess.Title == "" || sess.StartedAt == 0 {
 		var firstUser string
 		for _, m := range msgs {
@@ -345,7 +353,7 @@ func (a *luaAdapter) callFile(L *lua.LState, mod *lua.LTable, path string, data 
 		}
 	}
 	sess.MsgCount = len(msgs)
-	return sess, msgs, nil
+	return sess
 }
 
 // callLine invokes the plugin's line(line, state) -> msg|nil for each line,
@@ -948,7 +956,7 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 //
 // Contract recap: the manifest names a sqlite file, a table, a header key
 // prefix, and an optional related-key range template. The host scans header
-// rows in rowid order, runs the related range scan per id, and hands the
+// rows in key order, runs the related range scan per id, and hands the
 // blobs to session(id, header_value, related_rows, st). Lua sees only
 // strings — same sandbox guarantees as line/file kinds.
 //
@@ -997,6 +1005,10 @@ func (a *luaAdapter) kvScanStream(ctx context.Context, _ string, emit EmitFunc) 
 			return err
 		}
 		headers = append(headers, hdr{id: k[len(a.man.prefix):], val: string(v)})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 
@@ -1056,7 +1068,7 @@ func (a *luaAdapter) kvFetch(ctx context.Context, sourceID string) ([]Message, e
 type kvRow struct{ key, value string }
 
 // kvRelatedRows runs the configured related-range scan for one header id and
-// returns rows in storage (rowid) order. Empty `related` template yields no
+// returns rows in key order. Empty `related` template yields no
 // rows — handy for pure 1-row-per-session sources.
 func (a *luaAdapter) kvRelatedRows(ctx context.Context, db *sql.DB, id string) ([]kvRow, error) {
 	if a.man.related == "" {
@@ -1123,25 +1135,7 @@ func (a *luaAdapter) callSession(L *lua.LState, mod *lua.LTable, id, headerVal s
 		EndedAt:   lvInt(sessT.RawGetString("ended_at")),
 	}
 	msgs := a.tableToMessages(mv, sess.SourceID, truncate)
-	if sess.Title == "" || sess.StartedAt == 0 {
-		var firstUser string
-		for _, m := range msgs {
-			if m.Role == "user" && firstUser == "" && !looksLikeWrapper(m.Text) {
-				firstUser = m.Text
-			}
-			if sess.StartedAt == 0 || (m.TS > 0 && m.TS < sess.StartedAt) {
-				sess.StartedAt = m.TS
-			}
-			if m.TS > sess.EndedAt {
-				sess.EndedAt = m.TS
-			}
-		}
-		if sess.Title == "" {
-			sess.Title = titleFromPrompt(firstUser)
-		}
-	}
-	sess.MsgCount = len(msgs)
-	return sess, msgs, nil
+	return deriveSessionMeta(sess, msgs), msgs, nil
 }
 
 // keyRange returns the half-open [lo, hi) byte range that matches all keys
