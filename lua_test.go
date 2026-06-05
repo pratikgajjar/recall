@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // luaAdapterFor loads a repo plugin but points its roots at a test fixture dir.
@@ -183,6 +185,74 @@ func TestLuaObsidian(t *testing.T) {
 	}
 	if len(full) != 1 || !strings.Contains(full[0].Text, "Indexing design") {
 		t.Fatalf("fetch = %+v", full)
+	}
+}
+
+// TestMergeAdaptersOverride proves a Lua plugin replaces a built-in of the same
+// id, and that new ids are appended.
+func TestMergeAdaptersOverride(t *testing.T) {
+	builtin := &ClaudeAdapter{Root: "/x"}
+	override := &luaAdapter{path: "claude.lua", man: luaManifest{id: "claude", kind: "line"}}
+	extra := &luaAdapter{path: "obsidian.lua", man: luaManifest{id: "obsidian", kind: "file"}}
+
+	out := mergeAdapters([]Adapter{builtin}, []Adapter{override, extra})
+	if len(out) != 2 {
+		t.Fatalf("want 2 adapters, got %d", len(out))
+	}
+	var claude, obsidian Adapter
+	for _, a := range out {
+		switch a.ID() {
+		case "claude":
+			claude = a
+		case "obsidian":
+			obsidian = a
+		}
+	}
+	if _, ok := claude.(*luaAdapter); !ok {
+		t.Errorf("lua plugin should override built-in claude, got %T", claude)
+	}
+	if obsidian == nil {
+		t.Error("new lua source should be appended")
+	}
+}
+
+// TestLuaRunawayPluginSkipped proves the per-file timeout interrupts a runaway
+// transform: the bad file is skipped and the scan returns instead of hanging.
+func TestLuaRunawayPluginSkipped(t *testing.T) {
+	root := t.TempDir()
+	plug := filepath.Join(root, "runaway.lua")
+	if err := os.WriteFile(plug, []byte(`return {
+	  id = "runaway", kind = "line", glob = "*.jsonl", resume = "",
+	  line = function(line, st) while true do end end,
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, filepath.Join(root, "data", "x.jsonl"), `{"a":1}`)
+
+	man, err := readLuaManifest(plug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	man.roots = []string{filepath.Join(root, "data")}
+	ad := &luaAdapter{path: plug, man: man, batchSessions: 1}
+
+	old := luaFileTimeout
+	luaFileTimeout = 150 * time.Millisecond
+	defer func() { luaFileTimeout = old }()
+
+	done := make(chan struct{})
+	var sessions []Session
+	go func() {
+		sessions, _, _, _ = ad.Scan(context.Background(), "")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runaway plugin was not interrupted by the per-file timeout")
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("runaway plugin should yield no sessions, got %d", len(sessions))
 	}
 }
 

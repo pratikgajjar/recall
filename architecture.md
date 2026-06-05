@@ -31,7 +31,9 @@ a note or a graph node is the same contract with a different role and grouping.
    mechanism.
 
 Both satisfy the same `Adapter` interface, so search, `show`, `open`, MCP, and
-`doctor` treat them identically.
+`doctor` treat them identically. A plugin may even **override a built-in of the
+same id** — drop a `claude.lua` in your plugins dir and it replaces the Go Claude
+adapter, so you can iterate on a source without recompiling.
 
 ## Lua plugins: I/O in Go, logic in Lua
 
@@ -112,6 +114,9 @@ capable of everything the built-ins do.
 - Built-ins stay in Go; Lua runs only for opt-in plugins, on far smaller data.
 - One VM per scan, reused across files; `recall.get` keeps decoding in Go rather
   than marshaling whole blobs into Lua.
+- Each file is bounded by a per-file timeout, so a runaway or malicious plugin
+  can't hang or DoS indexing — the bad file is skipped and the scan continues
+  (`TestLuaRunawayPluginSkipped`).
 - `bench.sh` remains the gate on every change.
 
 ## Adding a source

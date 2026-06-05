@@ -14,6 +14,11 @@ import (
 	lua "github.com/yuin/gopher-lua"
 )
 
+// luaFileTimeout bounds how long a plugin may spend on a single file, so a
+// runaway or malicious transform can't hang indexing. Generous — parsing one
+// file is fast; this only catches pathological plugins. Var for tests.
+var luaFileTimeout = 60 * time.Second
+
 // luaAdapter runs a sandboxed Lua plugin as an Adapter. recall owns all I/O —
 // walking files, reading bytes, checkpointing, batching — and the plugin owns
 // only the transform from raw bytes to normalized Session/Message records. The
@@ -133,12 +138,21 @@ func (a *luaAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc)
 			return nil
 		}
 
+		// Bound each file: a runaway or DoS plugin can't hang indexing. On
+		// timeout the transform returns an error, the file is skipped, and the
+		// walk continues. Derived from the scan ctx, so Ctrl+C still aborts.
+		fileCtx, cancel := context.WithTimeout(ctx, luaFileTimeout)
+		L.SetContext(fileCtx)
+		var e error
 		switch a.man.kind {
 		case "line":
-			return a.streamLineFile(L, mod, path, size, mtime, prevSt, ok, nextMap, be)
+			e = a.streamLineFile(L, mod, path, size, mtime, prevSt, ok, nextMap, be)
 		default: // "file"
-			return a.streamWholeFile(L, mod, path, size, mtime, nextMap, be)
+			e = a.streamWholeFile(L, mod, path, size, mtime, nextMap, be)
 		}
+		cancel()
+		L.SetContext(ctx)
+		return e
 	})
 	if err != nil {
 		return err
