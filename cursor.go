@@ -33,9 +33,20 @@ func (a *CursorAdapter) Available() bool {
 	return err == nil
 }
 
+// sourceSQLiteDSN builds a strictly read-only DSN for a source database.
+// The file: URI form (path URL-encoded, so spaces in "Application Support"
+// survive) is REQUIRED for modernc/SQLite to honor mode=ro+immutable. A bare
+// "path?params" DSN is silently opened read-write and CHECKPOINTS a WAL
+// database on close — mutating the user's source data. immutable=1 also stops
+// SQLite from creating/altering -wal/-shm sidecars.
+func sourceSQLiteDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	return u.String() + "?mode=ro&immutable=1"
+}
+
 func (a *CursorAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
-	db, err := sql.Open("sqlite", gpath+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite", sourceSQLiteDSN(gpath))
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +145,7 @@ func (a *CursorAdapter) ScanStream(ctx context.Context, prev string, emit EmitFu
 	ck := parseCursorCkpt(prev)
 
 	gpath := filepath.Join(a.UserDir, "globalStorage", "state.vscdb")
-	db, err := sql.Open("sqlite", gpath+"?mode=ro&_pragma=query_only(true)&immutable=1")
+	db, err := sql.Open("sqlite", sourceSQLiteDSN(gpath))
 	if err != nil {
 		return err
 	}
@@ -478,7 +489,7 @@ func (a *CursorAdapter) mapComposersToProjects(ctx context.Context) (map[string]
 		if _, err := os.Stat(dbPath); err != nil {
 			continue
 		}
-		db, err := sql.Open("sqlite", dbPath+"?mode=ro&immutable=1")
+		db, err := sql.Open("sqlite", sourceSQLiteDSN(dbPath))
 		if err != nil {
 			continue
 		}

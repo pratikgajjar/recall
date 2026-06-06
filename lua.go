@@ -1043,7 +1043,7 @@ func (a *luaAdapter) kvScanStream(ctx context.Context, prev string, emit EmitFun
 	if _, err := os.Stat(src); err != nil {
 		return nil // missing source = empty scan, like a missing root
 	}
-	db, err := sql.Open("sqlite", src+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite", sourceSQLiteDSN(src))
 	if err != nil {
 		return err
 	}
@@ -1285,7 +1285,7 @@ func encodeKVCkpt(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (a *luaAdapter) kvFetch(ctx context.Context, sourceID string) ([]Message, error) {
 	src := a.expandKVSource()
-	db, err := sql.Open("sqlite", src+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite", sourceSQLiteDSN(src))
 	if err != nil {
 		return nil, err
 	}

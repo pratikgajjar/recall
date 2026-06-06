@@ -2,7 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -132,5 +138,57 @@ func TestCursorIncrementalByRowID(t *testing.T) {
 	}
 	if sessions[0].SourceID != "c2" {
 		t.Errorf("expected c2, got %q", sessions[0].SourceID)
+	}
+}
+
+// TestSourceDBNotMutated guards the read-only contract: opening a WAL-mode
+// source database (Cursor's state.vscdb is one) must not checkpoint or
+// otherwise write it. A bare "path?mode=ro" DSN is silently opened read-write
+// by modernc and checkpoints the WAL on close; sourceSQLiteDSN's file: URI
+// form prevents that. Skips if the sqlite3 CLI isn't available to build the
+// pending-WAL fixture.
+func TestSourceDBNotMutated(t *testing.T) {
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 CLI not available")
+	}
+	path := filepath.Join(t.TempDir(), "state.vscdb")
+	run := func(q string) {
+		if out, e := exec.Command(sqlite3, path, q).CombinedOutput(); e != nil {
+			t.Fatalf("sqlite3 setup: %v: %s", e, out)
+		}
+	}
+	run("PRAGMA journal_mode=WAL; CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY, value BLOB); INSERT INTO cursorDiskKV VALUES('a','1');")
+	// Second connection with autocheckpoint off leaves an uncheckpointed -wal.
+	run("PRAGMA wal_autocheckpoint=0; INSERT INTO cursorDiskKV VALUES('b','2');")
+	if _, e := os.Stat(path + "-wal"); e != nil {
+		t.Skip("environment did not leave a pending -wal; can't exercise checkpoint path")
+	}
+
+	sum := func() string {
+		b, e := os.ReadFile(path)
+		if e != nil {
+			t.Fatal(e)
+		}
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	before := sum()
+
+	db, err := sql.Open("sqlite", sourceSQLiteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM cursorDiskKV`).Scan(&n); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	db.Close()
+
+	if after := sum(); after != before {
+		t.Fatalf("source db was MODIFIED by a read-only open\n  before=%s\n  after =%s", before, after)
+	}
+	if _, e := os.Stat(path + "-wal"); e != nil {
+		t.Fatal("source -wal was checkpointed away by a read-only open")
 	}
 }
