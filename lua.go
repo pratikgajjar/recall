@@ -226,7 +226,7 @@ func (a *luaAdapter) streamWholeFile(L *lua.LState, mod *lua.LTable, path string
 // transform, resuming from the last byte offset when the file only grew.
 func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string, size, mtime int64, prevSt fileState, hadPrev bool, nextMap map[string]fileState, be *batchEmitter) error {
 	if hadPrev && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
-		p, err := a.callLine(L, mod, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true)
+		p, err := a.callLine(L, mod, path, prevSt.Offset, prevSt.Idx, prevSt.SID, mtime/1e6, true)
 		if err == nil && len(p.msgs) > 0 {
 			nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
 			return be.add(Session{
@@ -236,7 +236,7 @@ func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string,
 		}
 	}
 
-	p, err := a.callLine(L, mod, path, 0, 0, "", true)
+	p, err := a.callLine(L, mod, path, 0, 0, "", mtime/1e6, true)
 	nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 	if err != nil || p.sessID == "" || len(p.msgs) == 0 {
 		return nil
@@ -275,7 +275,7 @@ func (a *luaAdapter) Fetch(ctx context.Context, sourceID string) (msgs []Message
 		}
 		switch a.man.kind {
 		case "line":
-			p, e := a.callLine(L, mod, path, 0, 0, "", false)
+			p, e := a.callLine(L, mod, path, 0, 0, "", 0, false)
 			if e == nil && p.sessID == sourceID {
 				found = p.msgs
 				return fs.SkipAll
@@ -379,7 +379,7 @@ func deriveSessionMeta(sess Session, msgs []Message) Session {
 // callLine invokes the plugin's line(line, state) -> msg|nil for each line,
 // carrying a per-file state table so the plugin can stash the session id/cwd it
 // learns from a meta line.
-func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, startOffset int64, startIdx int, knownSID string, truncate bool) (luaLineParse, error) {
+func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, startOffset int64, startIdx int, knownSID string, mtimeMs int64, truncate bool) (luaLineParse, error) {
 	res := luaLineParse{sessID: knownSID, nextIdx: startIdx}
 	fn, ok := mod.RawGetString("line").(*lua.LFunction)
 	if !ok {
@@ -401,6 +401,7 @@ func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, start
 	state.RawSetString("name", lua.LString(filepath.Base(path)))
 	state.RawSetString("basename", lua.LString(stem(filepath.Base(path))))
 	state.RawSetString("dir", lua.LString(filepath.Dir(path)))
+	state.RawSetString("mtime", lua.LNumber(mtimeMs))
 	if knownSID != "" {
 		state.RawSetString("id", lua.LString(knownSID))
 	}
@@ -448,6 +449,9 @@ func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, start
 	res.title = lvStr(state.RawGetString("title"))
 	if t := lvInt(state.RawGetString("started_at")); t > 0 && (res.startedAt == 0 || t < res.startedAt) {
 		res.startedAt = t
+	}
+	if t := lvInt(state.RawGetString("ended_at")); t > res.endedAt {
+		res.endedAt = t
 	}
 	for i := range res.msgs {
 		res.msgs[i].SourceID = res.sessID
@@ -999,7 +1003,11 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 	}
 	switch a.man.kind {
 	case "line":
-		p, err := a.callLine(L, mod, sample, 0, 0, "", false)
+		var mtimeMs int64
+		if fi, e := os.Stat(sample); e == nil {
+			mtimeMs = fi.ModTime().UnixMilli()
+		}
+		p, err := a.callLine(L, mod, sample, 0, 0, "", mtimeMs, false)
 		if err != nil {
 			return nil, nil, err
 		}
