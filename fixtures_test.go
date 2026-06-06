@@ -130,6 +130,24 @@ func addCursorComposers(t *testing.T, userDir string, composers ...tComposer) {
 	}
 }
 
+// addCursorBubble appends a single bubble row to an existing composer without
+// rewriting its composerData header. The new row gets a higher rowid, so it's
+// visible to the watermark-incremental kv scan and reaches the transform via
+// the unseen-bubble tail loop.
+func addCursorBubble(t *testing.T, userDir, cid string, b tBubble) {
+	t.Helper()
+	db, err := sql.Open("sqlite", cursorGlobalDB(t, userDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	bv, _ := json.Marshal(map[string]any{"type": b.typ, "text": b.text})
+	if _, err := db.Exec(`INSERT INTO cursorDiskKV(key,value) VALUES(?,?)`,
+		"bubbleId:"+cid+":"+b.id, bv); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // addCursorWorkspace maps the given composer ids to a project folder via a
 // workspaceStorage entry (workspace.json + per-workspace state.vscdb).
 func addCursorWorkspace(t *testing.T, userDir, hash, folder string, composerIDs ...string) {

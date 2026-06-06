@@ -108,6 +108,10 @@ func main() {
 		if err := runMCP(args); err != nil {
 			fatal(err)
 		}
+	case "plugin":
+		if err := runPlugin(args); err != nil {
+			fatal(err)
+		}
 	default:
 
 		if err := runFind(os.Args[1:]); err != nil {
@@ -128,12 +132,39 @@ func defaultIndexPath() string {
 
 func defaultAdapters() []Adapter {
 	home, _ := os.UserHomeDir()
-	return []Adapter{
+	ads := []Adapter{
 		&CursorAdapter{UserDir: filepath.Join(home, "Library", "Application Support", "Cursor", "User")},
 		&ClaudeAdapter{Root: filepath.Join(home, ".claude", "projects")},
 		&CodexAdapter{Root: filepath.Join(home, ".codex", "sessions")},
 		&PiAdapter{Root: filepath.Join(home, ".pi", "agent", "sessions")},
 	}
+	// User-supplied Lua plugins extend the set without recompiling: each defines
+	// in Lua what records to extract; Go indexes them like any other source. A
+	// plugin may also override a built-in of the same id (drop a claude.lua to
+	// replace the Go Claude adapter).
+	plugins := discoverLuaAdapters(filepath.Join(home, ".recall", "plugins"))
+	return mergeAdapters(ads, plugins)
+}
+
+// mergeAdapters overlays Lua plugins onto the built-ins: a plugin whose id
+// matches a built-in replaces it; new ids are appended. This both enables
+// "redefine a source in Lua" and avoids two adapters sharing one id.
+func mergeAdapters(builtins, plugins []Adapter) []Adapter {
+	out := append([]Adapter(nil), builtins...)
+	for _, p := range plugins {
+		replaced := false
+		for i, a := range out {
+			if a.ID() == p.ID() {
+				out[i] = p
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type commonFlags struct {
@@ -385,6 +416,8 @@ func adapterPath(a Adapter) string {
 		return v.Root
 	case *PiAdapter:
 		return v.Root
+	case *luaAdapter:
+		return v.path
 	}
 	return ""
 }

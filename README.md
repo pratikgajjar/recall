@@ -124,7 +124,10 @@ recall show <session-id>           dump one session as transcript
 recall sessions [--repo P]         list recent sessions
 recall related <session-id>        sessions on the same topic
 recall mcp                         run an MCP server (Claude Code, Codex, Cursor, …)
-recall doctor                      health check
+recall plugin list                show bundled + installed Lua plugins
+recall plugin install <name>      install a bundled plugin into ~/.recall/plugins
+recall plugin test <file>         dry-run a plugin: print the records it produces
+recall doctor                     health check
 ```
 
 Flags can appear anywhere on the line:
@@ -153,7 +156,27 @@ The index lives at `~/.recall/index.sqlite`. It contains:
 
 Nuke `~/.recall/` and re-run `recall index` any time. The index is disposable.
 
-## Design
+## Index anything: Lua plugins
+
+The four sources above are built in. Anything else — a notes vault, another
+agent's history, any JSONL or SQLite-backed log — is indexable by a small Lua
+plugin, no recompile. A plugin is a sandboxed pure transform (no `os`/`io`/net):
+recall owns all I/O, the plugin just maps bytes to records.
+
+```bash
+recall plugin list                 # bundled + installed
+recall plugin install obsidian     # → ~/.recall/plugins/obsidian.lua
+recall index                       # now indexes your vault too
+```
+
+Bundled plugins install on demand (nothing auto-runs until you ask); anything in
+`~/.recall/plugins/*.lua` is auto-discovered on the next `index`, and a broken
+plugin is skipped without blocking the others. Kinds: `line` (JSONL), `file`
+(whole document), `kv` (SQLite, incremental via a `watermark`).
+
+See [`plugins/`](plugins/) for examples and
+[`architecture.md`](architecture.md) for the full contract.
+
 
 - **Read-only.** Sources stay the source of truth.
 - **No materialization.** No markdown copies, no canonical schema migrations.
