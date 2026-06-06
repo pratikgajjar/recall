@@ -152,7 +152,17 @@ func (a *luaAdapter) walkFiles(ctx context.Context, fn func(path string, d fs.Di
 	return nil
 }
 
-func (a *luaAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
+// ScanStream runs the plugin. A panic in plugin execution (a gopher-lua edge
+// or an unforeseen engine bug) is recovered into an error so one broken plugin
+// can't crash the whole index run — or the long-lived `recall mcp` daemon. The
+// guard is scoped to luaAdapter only: panics in the trusted Go adapters still
+// surface as real bugs. A returned error is handled upstream by skip-and-continue.
+func (a *luaAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("plugin %s panicked: %v", a.man.id, r)
+		}
+	}()
 	if a.man.kind == "kv" {
 		return a.kvScanStream(ctx, prev, emit)
 	}
@@ -246,7 +256,12 @@ func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string,
 	}, p.msgs)
 }
 
-func (a *luaAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, error) {
+func (a *luaAdapter) Fetch(ctx context.Context, sourceID string) (msgs []Message, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			msgs, err = nil, fmt.Errorf("plugin %s panicked: %v", a.man.id, r)
+		}
+	}()
 	if a.man.kind == "kv" {
 		return a.kvFetch(ctx, sourceID)
 	}
@@ -840,29 +855,27 @@ func readLuaManifest(path string) (luaManifest, error) {
 
 func runPlugin(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: recall plugin <list|test> ...")
+		return errors.New("usage: recall plugin <list|install|test> ...")
 	}
 	switch args[0] {
 	case "list":
 		return runPluginList()
+	case "install":
+		return runPluginInstall(args[1:])
 	case "test":
 		return runPluginTest(args[1:])
 	default:
-		return fmt.Errorf("unknown plugin subcommand %q (want: list, test)", args[0])
+		return fmt.Errorf("unknown plugin subcommand %q (want: list, install, test)", args[0])
 	}
 }
 
 func runPluginList() error {
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".recall", "plugins")
-	ads := discoverLuaAdapters(dir)
-	if len(ads) == 0 {
-		fmt.Printf("no plugins in %s\n", dir)
-		return nil
-	}
-	fmt.Printf("plugins in %s:\n", dir)
-	for _, a := range ads {
+	installed := map[string]bool{}
+	for _, a := range discoverLuaAdapters(dir) {
 		la := a.(*luaAdapter)
+		installed[la.man.id] = true
 		mark := "✗"
 		if la.Available() {
 			mark = "✓"
@@ -871,7 +884,62 @@ func runPluginList() error {
 		if la.man.kind == "kv" {
 			paths = []string{la.expandKVSource()}
 		}
-		fmt.Printf("  %s %-12s %-5s %s\n", mark, la.man.id, la.man.kind, strings.Join(paths, ", "))
+		fmt.Printf("installed  %s %-12s %-5s %s\n", mark, la.man.id, la.man.kind, strings.Join(paths, ", "))
+	}
+
+	// Bundled plugins not yet installed: offer them so users know they exist.
+	var available []string
+	for _, name := range embeddedPluginNames() {
+		if !installed[name] {
+			available = append(available, name)
+		}
+	}
+	if len(available) > 0 {
+		fmt.Printf("available  %s  (recall plugin install <name>)\n", strings.Join(available, ", "))
+	}
+	if len(installed) == 0 && len(available) == 0 {
+		fmt.Printf("no plugins (bundled or in %s)\n", dir)
+	}
+	return nil
+}
+
+// runPluginInstall copies a bundled plugin into ~/.recall/plugins so it gets
+// picked up on the next index. Refuses to clobber an existing install (which
+// may be user-edited) without --force. Flags may appear in any position.
+func runPluginInstall(args []string) error {
+	var force bool
+	var names []string
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			force = true
+		default:
+			names = append(names, a)
+		}
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("usage: recall plugin install <name>... [--force]  (bundled: %s)",
+			strings.Join(embeddedPluginNames(), ", "))
+	}
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".recall", "plugins")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, name := range names {
+		data, err := readEmbeddedPlugin(name)
+		if err != nil {
+			return fmt.Errorf("no bundled plugin %q (bundled: %s)", name,
+				strings.Join(embeddedPluginNames(), ", "))
+		}
+		dst := filepath.Join(dir, name+".lua")
+		if _, err := os.Stat(dst); err == nil && !force {
+			return fmt.Errorf("%s already installed at %s (use --force to overwrite)", name, dst)
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("installed %s → %s\n", name, dst)
 	}
 	return nil
 }

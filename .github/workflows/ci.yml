@@ -27,6 +27,6 @@ jobs:
       # (Live tests gated by RECALL_LIVE_* stay skipped — CI has no real
       # Cursor DB.)
       - name: lua plugin tests
-        run: go test -race -run 'TestLua|TestCursor|TestKeyRange|TestIDFromRelatedKey|TestAllShippedPlugins' ./...
+        run: go test -race -run 'TestLua|TestCursor|TestKeyRange|TestIDFromRelatedKey|TestAllShippedPlugins|TestDiscoverSkipsBrokenPlugin|TestBrokenPluginContained' ./...
         env:
           RECALL_PROP_ITER: "300"

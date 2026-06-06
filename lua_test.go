@@ -582,3 +582,72 @@ func TestAllShippedPluginsValid(t *testing.T) {
 		})
 	}
 }
+
+// TestDiscoverSkipsBrokenPlugin proves a broken plugin in the auto-loaded
+// ~/.recall/plugins dir doesn't block the good ones: discovery skips the
+// malformed file (with a stderr note) and still returns the valid adapter.
+// This is the load-time half of "one broken plugin can't break everything".
+func TestDiscoverSkipsBrokenPlugin(t *testing.T) {
+	dir := t.TempDir()
+	// valid
+	if err := os.WriteFile(filepath.Join(dir, "good.lua"), []byte(`return {
+		id = "good", kind = "file", glob = "*.md", resume = "x://{id}",
+		file = function(doc) return {id=doc.path}, {{role="note",text=doc.text}} end,
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// broken: syntax error
+	if err := os.WriteFile(filepath.Join(dir, "broken.lua"), []byte(`return { id = "broken"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// broken: valid Lua, invalid manifest (kv without source)
+	if err := os.WriteFile(filepath.Join(dir, "badman.lua"), []byte(`return {
+		id = "badman", kind = "kv", prefix = "x:", table = "t",
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ads := discoverLuaAdapters(dir)
+	if len(ads) != 1 || ads[0].ID() != "good" {
+		var ids []string
+		for _, a := range ads {
+			ids = append(ids, a.ID())
+		}
+		t.Fatalf("want only [good], got %v", ids)
+	}
+}
+
+// TestBrokenPluginContained proves a plugin that errors mid-transform is
+// contained per-file: Protect turns the Lua error into a skipped record, the
+// scan completes with zero sessions, and the process never crashes. Combined
+// with TestDiscoverSkipsBrokenPlugin (load-time) and TestLuaRunawayPluginSkipped
+// (timeout), this covers the realistic "broken plugin can't break the rest"
+// cases. A true Go panic from plugin code is additionally caught by the
+// recover() boundary in ScanStream/Fetch (for the long-lived mcp daemon), but
+// the engine is panic-free by construction so that path isn't unit-triggerable.
+func TestBrokenPluginContained(t *testing.T) {
+	root := t.TempDir()
+	plug := filepath.Join(root, "boom.lua")
+	if err := os.WriteFile(plug, []byte(`return {
+		id = "boom", kind = "file", glob = "*.md", resume = "x://{id}",
+		file = function(doc) error("boom") end,
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, filepath.Join(root, "data", "x.md"), "hello")
+
+	man, err := readLuaManifest(plug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	man.roots = []string{filepath.Join(root, "data")}
+	ad := &luaAdapter{path: plug, man: man, batchSessions: 1}
+
+	sessions, _, _, err := ad.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatalf("transform error should be swallowed per-file, got scan err: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("erroring transform should yield no sessions, got %d", len(sessions))
+	}
+}
