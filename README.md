@@ -148,7 +148,7 @@ Flags can appear anywhere on the line:
 | Claude Code | `~/.claude/projects/<sanitized-cwd>/*.jsonl` | One file per session, append-only JSONL |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | First line is `session_meta`; rest are `response_item` payloads |
 | pi | `~/.pi/agent/sessions/<sanitized-cwd>/*.jsonl` | First line is the `session` event; rest are `message` events |
-| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | Lua plugin (`cursor-agent`); `{role, message:{content:[parts]}}` per line, no timestamps |
+| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | Lua plugin (`cursor-agent`); `{role, message:{content:[parts]}}` per line; no per-event timestamps, so sessions are dated by file mtime |
 
 The index lives at `~/.recall/index.sqlite`. It contains:
 

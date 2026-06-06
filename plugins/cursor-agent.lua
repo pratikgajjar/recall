@@ -6,16 +6,26 @@
 -- where each part is one of:
 --   {"type":"text", "text":"..."}
 --   {"type":"tool_use", "name":"...", "input":{...}}
--- Cursor scrubs internal/reasoning blocks to "[REDACTED]" in the on-disk
--- transcript, and the file carries no per-event timestamp — so ts is 0.
--- Tool *results* are not echoed into the file, only the tool calls.
+-- Cursor scrubs internal/reasoning blocks to "[REDACTED]" and echoes only tool
+-- calls (not results). Per-message ts is 0; the file has no per-event time, so
+-- the session is dated by file mtime (st.mtime) instead.
 
-local function flatten(content)
+-- User turns are wrapped: an optional <timestamp>…</timestamp> preamble then
+-- the prompt inside <user_query>…</user_query>. Strip both so the title and
+-- indexed text are the bare prompt, not the markup.
+local function strip_user_wrappers(s)
+  s = s:gsub("<timestamp>.-</timestamp>", "")
+  s = s:gsub("</?user_query>", "")
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function flatten(content, role)
   if type(content) ~= "table" then return "" end
   local out = {}
   for _, p in ipairs(content) do
     if p.type == "text" and p.text and p.text ~= "" then
-      out[#out + 1] = p.text
+      local t = role == "user" and strip_user_wrappers(p.text) or p.text
+      if t ~= "" then out[#out + 1] = t end
     elseif p.type == "tool_use" and p.name and p.name ~= "" then
       out[#out + 1] = "[tool_use:" .. p.name .. "]"
     end
@@ -43,10 +53,16 @@ return {
     if (not st.project or st.project == "") and st.dir then
       st.project = slug_from_dir(st.dir)
     end
+    -- No per-event timestamps in the file; date the session by file mtime so
+    -- it sorts by recency and honors --since.
+    if st.mtime and st.mtime > 0 then
+      st.started_at = st.mtime
+      st.ended_at = st.mtime
+    end
 
     local role = recall.get(line, "role")
     if role ~= "user" and role ~= "assistant" then return nil end
-    local text = flatten(recall.get(line, "message.content"))
+    local text = flatten(recall.get(line, "message.content"), role)
     if text == "" then return nil end
     return { role = role, ts = 0, text = text }
   end,

@@ -336,14 +336,15 @@ func TestLuaParityClaudeIncremental(t *testing.T) {
 // a real `cursor-agent --print` run (~/.cursor/projects/<slug>/agent-transcripts
 // /<id>/<id>.jsonl). There is no Go adapter for cursor-agent, so we assert the
 // normalized output directly: session id == file basename, project == slug,
-// user/assistant text flattened, tool_use rendered as "[tool_use:Name]", and
-// ts == 0 (the on-disk transcript carries no per-event timestamps).
+// user text with the <timestamp>/<user_query> wrappers stripped, tool_use
+// rendered as "[tool_use:Name]", per-message ts == 0, and the session dated by
+// file mtime (the transcript has no per-event timestamps).
 func TestLuaCursorAgent(t *testing.T) {
 	root := t.TempDir()
 	sid := "d695b628-e3d7-4e61-a12a-b3e1559f10a1"
 	path := filepath.Join(root, "tmp-cursor-sandbox", "agent-transcripts", sid, sid+".jsonl")
 	writeLines(t, path,
-		`{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nCreate hello.txt\n</user_query>"}]}}`,
+		`{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Friday, Apr 24, 2026, 1:10 PM (UTC-7)</timestamp> <user_query>\nCreate hello.txt\n</user_query>"}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"[REDACTED]"},{"type":"tool_use","name":"Write","input":{"path":"/tmp/hello.txt","contents":"hi"}}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"[REDACTED]"},{"type":"tool_use","name":"Read","input":{"path":"/tmp/hello.txt"}},{"type":"tool_use","name":"StrReplace","input":{"path":"/tmp/hello.txt","old_string":"hi","new_string":"bye"}}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}`,
@@ -367,18 +368,28 @@ func TestLuaCursorAgent(t *testing.T) {
 	if s.Project != "tmp-cursor-sandbox" {
 		t.Errorf("project = %q (want tmp-cursor-sandbox slug)", s.Project)
 	}
+	// Dated by file mtime (writeLines just created it), not left at epoch 0,
+	// so it sorts by recency and honors --since.
+	if s.StartedAt == 0 {
+		t.Error("started_at = 0; want file mtime (cursor-agent dates sessions by mtime)")
+	}
 
 	if len(msgs) != 4 {
 		t.Fatalf("want 4 messages, got %d: %+v", len(msgs), msgs)
 	}
+	// The <timestamp> and <user_query> wrappers must be stripped from the title.
+	if strings.Contains(s.Title, "<timestamp>") || strings.Contains(s.Title, "<user_query>") {
+		t.Errorf("title still has wrapper markup: %q", s.Title)
+	}
 	want := []struct {
 		role     string
 		contains []string
+		absent   []string
 	}{
-		{"user", []string{"Create hello.txt"}},
-		{"assistant", []string{"[REDACTED]", "[tool_use:Write]"}},
-		{"assistant", []string{"[tool_use:Read]", "[tool_use:StrReplace]"}},
-		{"assistant", []string{"Done."}},
+		{"user", []string{"Create hello.txt"}, []string{"<timestamp>", "<user_query>", "</user_query>"}},
+		{"assistant", []string{"[REDACTED]", "[tool_use:Write]"}, nil},
+		{"assistant", []string{"[tool_use:Read]", "[tool_use:StrReplace]"}, nil},
+		{"assistant", []string{"Done."}, nil},
 	}
 	for i, w := range want {
 		if msgs[i].Role != w.role {
@@ -389,8 +400,13 @@ func TestLuaCursorAgent(t *testing.T) {
 				t.Errorf("msg[%d].text missing %q: %q", i, sub, msgs[i].Text)
 			}
 		}
+		for _, sub := range w.absent {
+			if strings.Contains(msgs[i].Text, sub) {
+				t.Errorf("msg[%d].text should have stripped %q: %q", i, sub, msgs[i].Text)
+			}
+		}
 		if msgs[i].TS != 0 {
-			t.Errorf("msg[%d].ts = %d (want 0; cursor-agent has no timestamps)", i, msgs[i].TS)
+			t.Errorf("msg[%d].ts = %d (want 0; cursor-agent has no per-event timestamps)", i, msgs[i].TS)
 		}
 	}
 }
