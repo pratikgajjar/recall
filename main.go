@@ -137,6 +137,7 @@ func defaultAdapters() []Adapter {
 		&ClaudeAdapter{Root: filepath.Join(home, ".claude", "projects")},
 		&CodexAdapter{Root: filepath.Join(home, ".codex", "sessions")},
 		&PiAdapter{Root: filepath.Join(home, ".pi", "agent", "sessions")},
+		&CursorAgentAdapter{Root: filepath.Join(home, ".cursor", "projects")},
 	}
 	// User-supplied Lua plugins extend the set without recompiling: each defines
 	// in Lua what records to extract; Go indexes them like any other source. A

@@ -411,6 +411,22 @@ func TestLuaCursorAgent(t *testing.T) {
 	}
 }
 
+// TestLuaParityCursorAgent pins the built-in CursorAgentAdapter and the bundled
+// cursor-agent.lua to identical output, so the Go adapter (which auto-indexes)
+// and the Lua override template can't drift — same contract as the other core
+// sources.
+func TestLuaParityCursorAgent(t *testing.T) {
+	root := t.TempDir()
+	sid := "a1b2c3d4-0000-4444-8888-aaaabbbbcccc"
+	writeLines(t, filepath.Join(root, "home-user-proj", "agent-transcripts", sid, sid+".jsonl"),
+		`{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Friday, Apr 24, 2026, 1:10 PM (UTC-7)</timestamp> <user_query> refactor the parser </user_query>"}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"[REDACTED]"},{"type":"tool_use","name":"Read","input":{"path":"/x"}}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}`,
+	)
+	assertParity(t, "cursor-agent", &CursorAgentAdapter{Root: root}, luaAdapterFor(t, "plugins/cursor-agent.lua", root))
+}
+
 // TestLuaObsidian proves recall is not chat-specific: a Markdown vault indexes
 // through the same contract, with no Go changes.
 func TestLuaObsidian(t *testing.T) {

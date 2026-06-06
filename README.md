@@ -148,7 +148,7 @@ Flags can appear anywhere on the line:
 | Claude Code | `~/.claude/projects/<sanitized-cwd>/*.jsonl` | One file per session, append-only JSONL |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | First line is `session_meta`; rest are `response_item` payloads |
 | pi | `~/.pi/agent/sessions/<sanitized-cwd>/*.jsonl` | First line is the `session` event; rest are `message` events |
-| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | Lua plugin (`cursor-agent`); `{role, message:{content:[parts]}}` per line; no per-event timestamps, so sessions are dated by file mtime |
+| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | `{role, message:{content:[parts]}}` per line; no per-event timestamps, so sessions are dated by file mtime |
 
 The index lives at `~/.recall/index.sqlite`. It contains:
 
@@ -159,7 +159,7 @@ Nuke `~/.recall/` and re-run `recall index` any time. The index is disposable.
 
 ## Index anything: Lua plugins
 
-The four sources above are built in. Anything else — a notes vault, another
+The sources above are built in. Anything else — a notes vault, another
 agent's history, any JSONL or SQLite-backed log — is indexable by a small Lua
 plugin, no recompile. A plugin is a sandboxed pure transform (no `os`/`io`/net):
 recall owns all I/O, the plugin just maps bytes to records.
