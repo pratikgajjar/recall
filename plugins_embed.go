@@ -12,7 +12,7 @@ import (
 // `recall plugin install <name>` without cloning the repo. They are NOT
 // auto-loaded — defaultAdapters only reads ~/.recall/plugins — so installing
 // recall never silently scans a vault (obsidian) or shadows a built-in Go
-// adapter (cursor). Installing one is an explicit opt-in.
+// adapter (cursor).
 //
 //go:embed plugins/*.lua
 var embeddedPlugins embed.FS

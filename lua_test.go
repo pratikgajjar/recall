@@ -583,10 +583,8 @@ func TestAllShippedPluginsValid(t *testing.T) {
 	}
 }
 
-// TestDiscoverSkipsBrokenPlugin proves a broken plugin in the auto-loaded
-// ~/.recall/plugins dir doesn't block the good ones: discovery skips the
-// malformed file (with a stderr note) and still returns the valid adapter.
-// This is the load-time half of "one broken plugin can't break everything".
+// TestDiscoverSkipsBrokenPlugin: a malformed plugin is skipped at load and the
+// valid ones still load.
 func TestDiscoverSkipsBrokenPlugin(t *testing.T) {
 	dir := t.TempDir()
 	// valid
@@ -617,14 +615,8 @@ func TestDiscoverSkipsBrokenPlugin(t *testing.T) {
 	}
 }
 
-// TestBrokenPluginContained proves a plugin that errors mid-transform is
-// contained per-file: Protect turns the Lua error into a skipped record, the
-// scan completes with zero sessions, and the process never crashes. Combined
-// with TestDiscoverSkipsBrokenPlugin (load-time) and TestLuaRunawayPluginSkipped
-// (timeout), this covers the realistic "broken plugin can't break the rest"
-// cases. A true Go panic from plugin code is additionally caught by the
-// recover() boundary in ScanStream/Fetch (for the long-lived mcp daemon), but
-// the engine is panic-free by construction so that path isn't unit-triggerable.
+// TestBrokenPluginContained: a transform error is swallowed per-file (the scan
+// returns no sessions, no crash) rather than aborting the run.
 func TestBrokenPluginContained(t *testing.T) {
 	root := t.TempDir()
 	plug := filepath.Join(root, "boom.lua")

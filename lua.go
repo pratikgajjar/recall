@@ -152,11 +152,8 @@ func (a *luaAdapter) walkFiles(ctx context.Context, fn func(path string, d fs.Di
 	return nil
 }
 
-// ScanStream runs the plugin. A panic in plugin execution (a gopher-lua edge
-// or an unforeseen engine bug) is recovered into an error so one broken plugin
-// can't crash the whole index run — or the long-lived `recall mcp` daemon. The
-// guard is scoped to luaAdapter only: panics in the trusted Go adapters still
-// surface as real bugs. A returned error is handled upstream by skip-and-continue.
+// Recover so a panic in plugin code becomes an error instead of crashing the
+// host; the built-in Go adapters are trusted and intentionally have no guard.
 func (a *luaAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -903,9 +900,8 @@ func runPluginList() error {
 	return nil
 }
 
-// runPluginInstall copies a bundled plugin into ~/.recall/plugins so it gets
-// picked up on the next index. Refuses to clobber an existing install (which
-// may be user-edited) without --force. Flags may appear in any position.
+// runPluginInstall copies a bundled plugin into ~/.recall/plugins. Refuses to
+// clobber an existing install (which may be user-edited) without --force.
 func runPluginInstall(args []string) error {
 	var force bool
 	var names []string
@@ -1034,16 +1030,13 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 
 // --- kv kind: index a sqlite KV table -------------------------------------
 //
-// Contract recap: the manifest names a sqlite file, a table, a header key
-// prefix, and an optional related-key range template. The host scans header
-// rows in key order, runs the related range scan per id, and hands the
-// blobs to session(id, header_value, related_rows, st). Lua sees only
-// strings — same sandbox guarantees as line/file kinds.
+// The manifest names a sqlite file, a table, a header key prefix, and an
+// optional related-key range template. The host scans header rows in key
+// order, runs the related range scan per id, and hands the blobs to
+// session(id, header_value, related_rows, st). Lua sees only strings.
 //
-// v1 always does a full rescan. Incremental (rowid-watermarked) resume is a
-// straight-line extension: track MAX(rowid) and re-emit only ids whose header
-// or related rows have advanced. The Go CursorAdapter does that for the
-// canonical cursor source; the Lua port is the proof of contract reach.
+// With a watermark column set, the scan resumes incrementally (see
+// kvScanStream); without one it full-rescans every pass.
 
 func (a *luaAdapter) kvScanStream(ctx context.Context, prev string, emit EmitFunc) error {
 	src := a.expandKVSource()
@@ -1062,11 +1055,9 @@ func (a *luaAdapter) kvScanStream(ctx context.Context, prev string, emit EmitFun
 	}
 	defer L.Close()
 
-	// Watermark drives incremental resume: store MAX(watermark) at the start
-	// of a pass and advance the checkpoint to it only once the whole pass
-	// completes. Intermediate batch flushes keep the OLD checkpoint, so a
-	// mid-pass crash re-runs the pass from the prior watermark (idempotent
-	// upsert absorbs the redo) rather than skipping un-emitted sessions.
+	// Advance the checkpoint to MAX(watermark) only at clean pass-end (intermediate
+	// flushes keep the old value), so a mid-pass crash re-runs from the prior
+	// watermark instead of skipping un-emitted sessions; the upsert absorbs the redo.
 	hasWM := a.man.watermark != ""
 	prevWM := parseKVCkpt(prev)
 	ckptVal := prev
@@ -1089,9 +1080,8 @@ func (a *luaAdapter) kvScanStream(ctx context.Context, prev string, emit EmitFun
 		}
 		fileCtx, cancel := context.WithTimeout(ctx, luaFileTimeout)
 		L.SetContext(fileCtx)
-		// Don't truncate at scan: the Go CursorAdapter (the parity target) keeps
-		// full text and lets index.go cap at write. line/file kinds truncate
-		// because their Go counterparts do; kv matches Cursor's no-truncate path.
+		// Don't truncate at scan: index.go caps text at write, and truncating here
+		// would permanently drop characters from the stored excerpt.
 		sess, msgs, e := a.callSession(L, mod, id, val, related, false)
 		cancel()
 		L.SetContext(ctx)
@@ -1199,9 +1189,8 @@ func (a *luaAdapter) kvHeaderValue(ctx context.Context, db *sql.DB, id string) (
 	return string(v), true, nil
 }
 
-// kvTouchedIDs returns the set of header ids whose header row or related rows
-// have a watermark greater than prev. Mirrors cursor.go's collectTouchedComposers
-// but derives the key ranges from the manifest's prefix/related templates.
+// kvTouchedIDs returns the header ids whose header row or related rows have a
+// watermark greater than prev, scanning the prefix/related key ranges.
 func (a *luaAdapter) kvTouchedIDs(ctx context.Context, db *sql.DB, prev int64) ([]string, error) {
 	hdrLo, hdrHi := keyRange(a.man.prefix)
 	relPre, relSuf := a.relatedPrefixSuffix()
@@ -1267,13 +1256,9 @@ func (a *luaAdapter) relatedPrefixSuffix() (string, string) {
 // template's prefix/suffix around {id}. "bubbleId:c1:b2" with ("bubbleId:",
 // ":") yields "c1".
 //
-// The id is taken as everything between relPre and the FIRST occurrence of
-// relSuf, matching cursor.go's bubbleId split. This is correct only when the
-// id itself cannot contain relSuf (Cursor composer ids are UUIDs, so ":" never
-// appears inside one). A kv plugin whose ids may contain the delimiter must
-// pick a relSuf that can't appear in an id, or the touched-id set will resolve
-// short and miss the real session. An empty id (key == relPre+relSuf) is
-// rejected, again matching cursor.go (i > 0).
+// The id is everything between relPre and the FIRST relSuf, so it is correct
+// only when the id itself cannot contain relSuf (e.g. UUIDs vs a ":" suffix).
+// An empty id (key == relPre+relSuf) is rejected.
 func idFromRelatedKey(key, relPre, relSuf string) (string, bool) {
 	if !strings.HasPrefix(key, relPre) {
 		return "", false
