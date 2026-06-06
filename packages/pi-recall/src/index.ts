@@ -9,36 +9,30 @@
 
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-const moduleRequire = createRequire(import.meta.url);
-
-// Resolve the matching prebuilt binary from optionalDependencies installed
-// by pi/npm. Returns undefined when no platform-specific package is present
-// (npm only installs the one matching the host os/arch).
+// Resolve the prebuilt binary bundled in this package's bin/ directory. The
+// release pipeline drops one binary per platform (recall-<os>-<arch>); we pick
+// the one matching the host. Returns undefined when none is present (e.g. a
+// source checkout), so the caller falls back to `recall` on PATH.
 function resolveBundledBin(): string | undefined {
-  const pkg = `@pratikgajjar/recall-bin-${process.platform}-${process.arch}`;
+  const name = `recall-${process.platform}-${process.arch}`;
+  const binPath = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", name);
+  if (!existsSync(binPath)) return undefined;
+  // npm has historically lost the +x bit on extracted tarball binaries;
+  // restore it best-effort so the first call succeeds.
   try {
-    const pkgJson = moduleRequire.resolve(`${pkg}/package.json`);
-    const binPath = join(dirname(pkgJson), "recall");
-    if (!existsSync(binPath)) return undefined;
-    // npm has historically lost the +x bit on extracted tarball binaries;
-    // restore it best-effort so the first call succeeds.
-    try {
-      const mode = statSync(binPath).mode;
-      if (!(mode & 0o111)) chmodSync(binPath, 0o755);
-    } catch {
-      /* best effort */
-    }
-    return binPath;
+    const mode = statSync(binPath).mode;
+    if (!(mode & 0o111)) chmodSync(binPath, 0o755);
   } catch {
-    return undefined;
+    /* best effort */
   }
+  return binPath;
 }
 
 const DEFAULT_SEARCH_LIMIT = 15;
@@ -117,9 +111,8 @@ export default function recallExtension(pi: ExtensionAPI) {
   }
 
   function resolveBin(): string {
-    // Precedence: explicit flag → env override → bundled per-platform package
-    //   (installed via optionalDependencies, so `pi install`/`pi update` ship
-    //    the matching binary in lockstep with the extension) → PATH fallback.
+    // Precedence: explicit flag -> env override -> binary bundled in this
+    // package's bin/ (shipped by the release pipeline) -> `recall` on PATH.
     const flag = pi.getFlag("recall-bin") as string | undefined;
     if (flag) return flag;
     if (process.env.RECALL_BIN) return process.env.RECALL_BIN;

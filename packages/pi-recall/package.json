@@ -33,7 +33,8 @@
     "image": "https://raw.githubusercontent.com/pratikgajjar/recall/main/packages/pi-recall/assets/demo.png"
   },
   "files": [
-    "src"
+    "src",
+    "bin"
   ],
   "publishConfig": {
     "access": "public"
@@ -45,12 +46,6 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
-  },
-  "optionalDependencies": {
-    "@pratikgajjar/recall-bin-darwin-arm64": "0.1.4",
-    "@pratikgajjar/recall-bin-darwin-x64": "0.1.4",
-    "@pratikgajjar/recall-bin-linux-arm64": "0.1.4",
-    "@pratikgajjar/recall-bin-linux-x64": "0.1.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

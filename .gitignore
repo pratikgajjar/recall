@@ -8,3 +8,6 @@
 # node / pi extension
 node_modules/
 *.tsbuildinfo
+
+# pi-recall: per-platform binaries assembled at publish time
+packages/pi-recall/bin/

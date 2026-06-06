@@ -14,11 +14,10 @@ _The agent calls `recall_search` to find a past conversation, then reads it in f
 pi install npm:@pratikgajjar/pi-recall
 ```
 
-The matching prebuilt `recall` binary ships with the package (as a per-platform
-`optionalDependency`), so `pi install` / `pi update` keep the extension **and**
-the binary in lockstep — no separate `go install` or `brew`. The extension
-resolves the binary in this order: `--recall-bin` flag → `RECALL_BIN` env →
-bundled binary → `recall` on `PATH`.
+The prebuilt `recall` binary for your platform ships inside the package, so
+`pi install` / `pi update` keep the extension **and** the binary in lockstep —
+no separate `go install` or `brew`. The extension resolves the binary in this
+order: `--recall-bin` flag -> `RECALL_BIN` env -> bundled binary -> `recall` on `PATH`.
 
 Then build the index once:
 
