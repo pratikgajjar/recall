@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	lua "github.com/yuin/gopher-lua"
 )
 
 // luaAdapterFor loads a repo plugin but points its roots at a test fixture dir.
@@ -486,5 +488,91 @@ func TestLuaSandbox(t *testing.T) {
 		assert(type(recall.get) == "function", "recall helpers must be present")
 	`); err != nil {
 		t.Fatalf("sandbox check failed: %v", err)
+	}
+}
+
+// TestIDFromRelatedKey pins the related-key → header-id recovery used by the
+// kv watermark scan, including the edge cases the reviewer flagged: the
+// first-delimiter split (correct when ids can't contain relSuf), empty-id
+// rejection, and prefix/suffix mismatches.
+func TestIDFromRelatedKey(t *testing.T) {
+	cases := []struct {
+		name          string
+		key, pre, suf string
+		wantID        string
+		wantOK        bool
+	}{
+		{"cursor shape", "bubbleId:c1:b2", "bubbleId:", ":", "c1", true},
+		{"uuid id", "bubbleId:0006e07f-93cf:bX", "bubbleId:", ":", "0006e07f-93cf", true},
+		{"first-delimiter split", "p:a:b:c", "p:", ":", "a", true},
+		{"empty id rejected", "bubbleId::b2", "bubbleId:", ":", "", false},
+		{"no suffix present", "bubbleId:c1", "bubbleId:", ":", "", false},
+		{"wrong prefix", "other:c1:b2", "bubbleId:", ":", "", false},
+		{"empty suffix takes rest", "note:c1", "note:", "", "c1", true},
+		{"empty suffix empty rest", "note:", "note:", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			id, ok := idFromRelatedKey(c.key, c.pre, c.suf)
+			if id != c.wantID || ok != c.wantOK {
+				t.Fatalf("idFromRelatedKey(%q,%q,%q) = (%q,%v), want (%q,%v)",
+					c.key, c.pre, c.suf, id, ok, c.wantID, c.wantOK)
+			}
+		})
+	}
+}
+
+// TestAllShippedPluginsValid guards every plugins/*.lua as a shippable
+// artifact: it must load in the sandbox, declare a valid manifest, expose the
+// transform function its kind requires, and carry a resume template that
+// OpenURL can substitute. This catches a broken or half-finished plugin the
+// moment it lands, without needing a bespoke parity test for each one.
+func TestAllShippedPluginsValid(t *testing.T) {
+	paths, err := filepath.Glob("plugins/*.lua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) < 5 {
+		t.Fatalf("expected at least 5 shipped plugins, found %d (%v)", len(paths), paths)
+	}
+
+	// transform fn required per kind.
+	wantFn := map[string]string{"line": "line", "file": "file", "kv": "session"}
+	seenID := map[string]string{}
+
+	for _, p := range paths {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			man, err := readLuaManifest(p)
+			if err != nil {
+				t.Fatalf("manifest invalid: %v", err)
+			}
+			if prev, dup := seenID[man.id]; dup {
+				t.Fatalf("duplicate plugin id %q (also in %s)", man.id, prev)
+			}
+			seenID[man.id] = p
+
+			// kind is constrained by readLuaManifest, but assert the fn exists.
+			L := newLuaState(context.Background())
+			defer L.Close()
+			mod, err := loadModule(L, p)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			fn := wantFn[man.kind]
+			if _, ok := mod.RawGetString(fn).(*lua.LFunction); !ok {
+				t.Errorf("kind %q requires a %s() function", man.kind, fn)
+			}
+
+			// A shipped plugin must be resumable into its source tool.
+			if man.resume == "" || !strings.Contains(man.resume, "{id}") {
+				t.Errorf("resume = %q, want a non-empty template containing {id}", man.resume)
+			}
+			ad := &luaAdapter{path: p, man: man}
+			if got := ad.OpenURL("ABC123"); !strings.Contains(got, "ABC123") {
+				t.Errorf("OpenURL did not substitute id: %q", got)
+			}
+			// Available() must not panic regardless of host filesystem.
+			_ = ad.Available()
+		})
 	}
 }

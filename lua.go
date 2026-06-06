@@ -1198,15 +1198,26 @@ func (a *luaAdapter) relatedPrefixSuffix() (string, string) {
 // idFromRelatedKey recovers the header id embedded in a related key, given the
 // template's prefix/suffix around {id}. "bubbleId:c1:b2" with ("bubbleId:",
 // ":") yields "c1".
+//
+// The id is taken as everything between relPre and the FIRST occurrence of
+// relSuf, matching cursor.go's bubbleId split. This is correct only when the
+// id itself cannot contain relSuf (Cursor composer ids are UUIDs, so ":" never
+// appears inside one). A kv plugin whose ids may contain the delimiter must
+// pick a relSuf that can't appear in an id, or the touched-id set will resolve
+// short and miss the real session. An empty id (key == relPre+relSuf) is
+// rejected, again matching cursor.go (i > 0).
 func idFromRelatedKey(key, relPre, relSuf string) (string, bool) {
 	if !strings.HasPrefix(key, relPre) {
 		return "", false
 	}
 	rest := key[len(relPre):]
 	if relSuf == "" {
+		if rest == "" {
+			return "", false
+		}
 		return rest, true
 	}
-	if i := strings.Index(rest, relSuf); i >= 0 {
+	if i := strings.Index(rest, relSuf); i > 0 {
 		return rest[:i], true
 	}
 	return "", false

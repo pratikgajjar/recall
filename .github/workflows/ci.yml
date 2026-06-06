@@ -19,3 +19,14 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test -race ./...
+
+      # Lua plugin tier: all plugins/*.lua load + validate, every kind
+      # (line/file/kv) reaches parity with its Go adapter, and the kv
+      # watermark resume holds. Re-run the Lua suite with more property
+      # iterations for wider input coverage on the parity-fragile bits.
+      # (Live tests gated by RECALL_LIVE_* stay skipped — CI has no real
+      # Cursor DB.)
+      - name: lua plugin tests
+        run: go test -race -run 'TestLua|TestCursor|TestKeyRange|TestIDFromRelatedKey|TestAllShippedPlugins' ./...
+        env:
+          RECALL_PROP_ITER: "300"
