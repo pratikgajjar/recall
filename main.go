@@ -10,12 +10,28 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 )
 
-// version is overridden at release time via -ldflags "-X main.version=...".
-var version = "0.1.4"
+// version is set by goreleaser via -ldflags "-X main.version=..." (a plain
+// string var with no initializer, so the linker's -X can patch it).
+var version string
+
+// recallVersion returns the release version: the ldflag-injected value, else
+// the module version `go install` embeds (e.g. "v0.2.5"), else "dev" for a
+// source build. This keeps `go install ...@vX` reporting the right version
+// even though it never runs goreleaser's ldflags.
+func recallVersion() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return "dev"
+}
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `recall %s — your AI chat history, searchable across Cursor, Claude Code, Codex, pi.
@@ -52,7 +68,7 @@ DATA
   index    ~/.recall/index.sqlite   (disposable — rebuild any time)
   sources  Cursor SQLite KV, Claude/Codex/pi JSONL files
            (read-only — recall never mutates source data)
-`, version)
+`, recallVersion())
 }
 
 func main() {
@@ -67,7 +83,7 @@ func main() {
 	case "-h", "--help", "help":
 		usage()
 	case "version", "--version", "-v":
-		fmt.Println(version)
+		fmt.Println(recallVersion())
 	case "index":
 		if err := runIndex(args); err != nil {
 			fatal(err)
@@ -353,7 +369,7 @@ func runIndex(args []string) error {
 }
 
 func runDoctor(_ []string) error {
-	fmt.Printf("recall %s\n\n", version)
+	fmt.Printf("recall %s\n\n", recallVersion())
 	fmt.Println("sources:")
 	for _, ad := range defaultAdapters() {
 		ok := ad.Available()
