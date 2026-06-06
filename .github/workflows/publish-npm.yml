@@ -1,0 +1,37 @@
+name: publish-npm
+
+# Publishes @pratikgajjar/pi-recall to npm on release tags. Kept as a separate
+# workflow named publish-npm.yml because npm's Trusted Publisher (OIDC) for the
+# package is bound to this workflow file — publishing from any other workflow
+# fails auth. No NPM_TOKEN; OIDC only.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required by npm OIDC trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # OIDC Trusted Publishing requires npm >= 11.5.1.
+      - run: npm install -g npm@latest
+
+      - run: bash .github/scripts/publish-npm.sh
