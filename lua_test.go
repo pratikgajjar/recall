@@ -199,6 +199,12 @@ func TestLuaCursorKVResumeAfterEditedComposer(t *testing.T) {
 // extracts from the same DB. Project mapping (which the Go adapter reads from
 // workspaceStorage) is intentionally not in v1 of cursor.lua, so we compare
 // every Session field except Project.
+//
+// For an ad-hoc real-data check against your own Cursor history (not committed
+// because it only runs on a macOS box that has Cursor installed):
+//
+//	go test -run TestLuaParityCursor  # hermetic; for live data, point a
+//	# luaAdapterForKV at ~/Library/Application Support/Cursor/User/globalStorage/state.vscdb
 func TestLuaParityCursor(t *testing.T) {
 	userDir := t.TempDir()
 	addCursorComposers(t, userDir,
