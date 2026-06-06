@@ -159,52 +159,22 @@ Nuke `~/.recall/` and re-run `recall index` any time. The index is disposable.
 ## Index anything: Lua plugins
 
 The four sources above are built in. Anything else — a notes vault, another
-agent's history, any JSONL or SQLite-backed log — can be indexed by a small
-Lua plugin, with no recompile. A plugin is a **pure transform**: recall owns
-all I/O (walking files, reading bytes, checkpointing, FTS, ranking); the plugin
-only maps raw bytes to normalized records. The Lua VM has no `os`, `io`,
-`require`, or network — a plugin can't touch the filesystem or shell out, so
-installing one you didn't write is safe.
-
-Plugins ship bundled in the binary and install on demand (nothing auto-runs
-until you ask):
+agent's history, any JSONL or SQLite-backed log — is indexable by a small Lua
+plugin, no recompile. A plugin is a sandboxed pure transform (no `os`/`io`/net):
+recall owns all I/O, the plugin just maps bytes to records.
 
 ```bash
 recall plugin list                 # bundled + installed
 recall plugin install obsidian     # → ~/.recall/plugins/obsidian.lua
 recall index                       # now indexes your vault too
-recall "that thing in my notes"
 ```
 
-Anything dropped in `~/.recall/plugins/*.lua` is auto-discovered on the next
-`index`. A broken plugin is skipped with a warning and never blocks the others.
+Bundled plugins install on demand (nothing auto-runs until you ask); anything in
+`~/.recall/plugins/*.lua` is auto-discovered on the next `index`, and a broken
+plugin is skipped without blocking the others. Kinds: `line` (JSONL), `file`
+(whole document), `kv` (SQLite, incremental via a `watermark`).
 
-A plugin is one Lua table — a manifest plus one transform function per *kind*:
-
-| kind | source shape | transform |
-|---|---|---|
-| `line` | JSONL, append-only (offset-resumable) | `line(line, st)` |
-| `file` | whole document (e.g. Markdown) | `file(doc)` |
-| `kv` | SQLite key/value table | `session(id, header, related, st)` |
-
-```lua
--- obsidian.lua — index a folder of Markdown notes as one record each
-return {
-  id = "obsidian", kind = "file",
-  roots = { "~/Documents/Obsidian", "~/notes" }, glob = "*.md",
-  resume = "obsidian://open?path={id}",
-  file = function(doc)
-    return { id = doc.path, project = doc.dir, title = doc.basename,
-             started_at = doc.mtime, ended_at = doc.mtime },
-           { { role = "note", ts = doc.mtime, text = doc.text } }
-  end,
-}
-```
-
-The `kv` kind reaches SQLite-backed sources (Cursor/Windsurf-style `state.vscdb`)
-with the same purity model and supports incremental resume via a `watermark`
-column. `recall plugin test <file>` dry-runs a plugin and prints exactly what it
-would index. See [`plugins/`](plugins/) for the bundled examples and
+See [`plugins/`](plugins/) for examples and
 [`architecture.md`](architecture.md) for the full contract.
 
 

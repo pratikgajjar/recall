@@ -169,21 +169,22 @@ return {
 ```
 
 `plugins/cursor.lua` is the proof-of-reach, parity-checked against the built-in
-`cursor.go` (`TestLuaParityCursor`, plus an env-gated live test). **The built-in
-`cursor.go` stays the default** and remains the full-fidelity path: `cursor.lua`
-v1 deliberately omits two things `cursor.go` does — `workspaceStorage → project`
-mapping (a second I/O source the single-DB manifest doesn't model) and
-rowid-watermarked incremental scan (v1 full-rescans, emitting an empty
-checkpoint). Because a plugin **overrides** a built-in of the same id, dropping
-`cursor.lua` into your plugins dir trades those away — fine for experimenting,
-not yet a replacement for `cursor.go`.
+`cursor.go` (`TestLuaParityCursor` + randomized `TestCursorLuaParityProperty`).
+It supports incremental resume via the `watermark` manifest field (a monotonic
+INTEGER column, `rowid` for Cursor): the scan records `MAX(watermark)` and on the
+next pass re-emits only sessions whose header or related rows advanced past it.
+**The built-in `cursor.go` stays the default** and remains the full-fidelity path:
+`cursor.lua` v1 deliberately omits one thing `cursor.go` does —
+`workspaceStorage → project` mapping (a second I/O source the single-DB manifest
+doesn't model). Because a plugin **overrides** a built-in of the same id, dropping
+`cursor.lua` into your plugins dir trades that away — fine for experimenting, not
+yet a replacement for `cursor.go`.
 
 ## What's next
 
-- **`kv` incremental + multi-source.** Give `kv` a rowid watermark (like
-  `cursor.go`) so it stops full-rescanning, and a way to declare an auxiliary
-  scan so `cursor.lua` can resolve `workspaceStorage → project` — the two gaps
-  that keep `cursor.go` the default.
+- **`kv` multi-source.** A way to declare an auxiliary scan so `cursor.lua` can
+  resolve `workspaceStorage → project` — the one gap that keeps `cursor.go` the
+  default.
 - **Windsurf/Cody** as `kv` plugins (same `state.vscdb` shape).
 - `recall plugin new` / `plugin add <repo>` for authoring and sharing.
 - Host-mediated fetch for authenticated remote sources (the host does the network
