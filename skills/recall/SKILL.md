@@ -51,7 +51,9 @@ flag); you can't author a facet as a tag.
 
 ## Flags & tips
 
-`--repo PATH` (`.` = cwd) · `--since 7d` · `--limit N` · `--json`
+`--repo PATH` (`.` = cwd) · `--after 7d` / `--before WHEN` (alias `--since`) · `--limit N` · `--json`
+
+`find`, `sessions`, and `show` print terse **`next:`/`prev:`** page commands at the bottom — follow them to traverse everything. Across sessions pages by time (`--before`/`--after`); within `show` by message window (`--range`). `WHEN` is a duration (`7d`), an epoch-ms (paste `started_at_ms` from `--json`), or `YYYY-MM-DD`.
 
 - Query with **concrete identifiers** (errors, symbols, paths) — it's FTS, not semantic.
 - `recall related <id>` widens to neighbouring sessions on the same topic.

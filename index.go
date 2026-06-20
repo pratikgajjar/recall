@@ -441,9 +441,13 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 		where = append(where, "s.project = ?")
 		args = append(args, opts.Project)
 	}
-	if opts.Since > 0 {
+	if opts.After > 0 {
 		where = append(where, "s.started_at >= ?")
-		args = append(args, opts.Since)
+		args = append(args, opts.After)
+	}
+	if opts.Before > 0 {
+		where = append(where, "s.started_at < ?")
+		args = append(args, opts.Before)
 	}
 	if clause, tagArgs := tagFilterClause("s.id", opts.Tags); clause != "" {
 		where = append(where, clause)
@@ -528,6 +532,14 @@ func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {
 		where = append(where, "project = ?")
 		args = append(args, opts.Project)
 	}
+	if opts.After > 0 {
+		where = append(where, "started_at >= ?")
+		args = append(args, opts.After)
+	}
+	if opts.Before > 0 {
+		where = append(where, "started_at < ?")
+		args = append(args, opts.Before)
+	}
 	if clause, tagArgs := tagFilterClause("id", opts.Tags); clause != "" {
 		where = append(where, clause)
 		args = append(args, tagArgs...)
@@ -559,7 +571,8 @@ func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {
 type SearchOpts struct {
 	Source  string
 	Project string
-	Since   int64
+	After   int64 // started_at >= After (lower bound; --since is an alias)
+	Before  int64 // started_at <  Before (upper bound; for keyset paging)
 	Limit   int
 	AnyTerm bool
 	Tags    []string // session must carry ALL of these tags (AND)
@@ -637,9 +650,13 @@ func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 		where = append(where, "project = ?")
 		args = append(args, opts.Project)
 	}
-	if opts.Since > 0 {
+	if opts.After > 0 {
 		where = append(where, "started_at >= ?")
-		args = append(args, opts.Since)
+		args = append(args, opts.After)
+	}
+	if opts.Before > 0 {
+		where = append(where, "started_at < ?")
+		args = append(args, opts.Before)
 	}
 	q := `SELECT source, COALESCE(project,''), COUNT(*), COALESCE(SUM(msg_count),0)
 	        FROM sessions WHERE ` + strings.Join(where, " AND ") + `

@@ -63,7 +63,7 @@ func TestRenderTranscriptHeadersAreSelfLocating(t *testing.T) {
 		"## msg 3/10 user", // each message carries N/TOTAL
 		"## msg 4/10 user",
 		"## msg 5/10 user",
-		"Continue with --range 6:", // pagination hint when more remains
+		"next: --range 6:", // pagination hint when more remains
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered slice missing %q\n---\n%s", want, out)

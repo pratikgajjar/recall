@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -206,16 +207,20 @@ func (s *stringSlice) Set(v string) error {
 }
 
 type commonFlags struct {
-	repo  string
-	since string
-	limit int
-	json  bool
-	tags  stringSlice
+	repo   string
+	since  string
+	after  string
+	before string
+	limit  int
+	json   bool
+	tags   stringSlice
 }
 
 func (cf *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&cf.repo, "repo", "", "restrict to a project folder")
-	fs.StringVar(&cf.since, "since", "", "e.g. 24h, 7d, 30d")
+	fs.StringVar(&cf.since, "since", "", "alias for --after (lower time bound)")
+	fs.StringVar(&cf.after, "after", "", "only sessions started after this: 7d, an epoch-ms, or YYYY-MM-DD")
+	fs.StringVar(&cf.before, "before", "", "only sessions started before this (for paging back through history)")
 	fs.IntVar(&cf.limit, "limit", 30, "max results")
 	fs.BoolVar(&cf.json, "json", false, "machine-readable output")
 	fs.Var(&cf.tags, "tag", "filter selector, repeatable (AND): a user tag, or a\n\treserved facet like source:cursor")
@@ -290,17 +295,64 @@ func (cf *commonFlags) toSearchOpts() (SearchOpts, error) {
 		Limit:   cf.limit,
 		Tags:    tags,
 	}
-	if cf.since != "" {
-		d, err := parseSince(cf.since)
+	// --since is a permanent alias for --after (lower time bound). --after wins
+	// if both are given.
+	lower := cf.after
+	if lower == "" {
+		lower = cf.since
+	}
+	if lower != "" {
+		t, err := parseInstant(lower)
 		if err != nil {
 			return opts, err
 		}
-		opts.Since = time.Now().Add(-d).UnixMilli()
+		opts.After = t
+	}
+	if cf.before != "" {
+		t, err := parseInstant(cf.before)
+		if err != nil {
+			return opts, err
+		}
+		opts.Before = t
 	}
 	return opts, nil
 }
 
-func parseSince(s string) (time.Duration, error) {
+// parseInstant resolves a time bound to an absolute epoch-ms. It accepts:
+//   - a duration ("7d", "24h", "90m") — that long before now;
+//   - a raw epoch-ms integer — e.g. a started_at_ms copied from --json output,
+//     which makes keyset paging (`--before <oldest_started_at_ms>`) trivial;
+//   - an RFC3339 timestamp or a YYYY-MM-DD date.
+func parseInstant(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	if isAllDigits(s) {
+		return strconv.ParseInt(s, 10, 64)
+	}
+	if d, err := parseDuration(s); err == nil {
+		return time.Now().Add(-d).UnixMilli(), nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UnixMilli(), nil
+		}
+	}
+	return 0, fmt.Errorf("invalid time %q (use a duration like 7d, an epoch-ms, or YYYY-MM-DD)", s)
+}
+
+func isAllDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// parseDuration extends time.ParseDuration with a "d" (day) suffix.
+func parseDuration(s string) (time.Duration, error) {
 	if strings.HasSuffix(s, "d") {
 		days, err := time.ParseDuration(strings.TrimSuffix(s, "d") + "h")
 		if err != nil {
@@ -650,7 +702,57 @@ func runFind(args []string) error {
 		return JSONNewEncoder(os.Stdout).Encode(hits)
 	}
 	printHits(os.Stdout, hits)
+	printPager(os.Stdout, "find", query, cf, hits)
 	return nil
+}
+
+// printPager emits one-line, copy-pasteable next/prev page commands so an agent
+// can traverse all matches mechanically. "next" walks back through history
+// (--before the oldest hit); "prev" returns toward the present (--after the
+// newest). Epoch-ms is used because parseInstant accepts it. Kept terse on
+// purpose — this rides along in every result.
+func printPager(w io.Writer, verb, query string, cf commonFlags, hits []Hit) {
+	if len(hits) == 0 {
+		return
+	}
+	var tmin, tmax int64
+	for _, h := range hits {
+		if h.StartedAt == 0 {
+			continue
+		}
+		if tmin == 0 || h.StartedAt < tmin {
+			tmin = h.StartedAt
+		}
+		if h.StartedAt > tmax {
+			tmax = h.StartedAt
+		}
+	}
+	base := pagerBase(verb, query, cf)
+	if cf.limit > 0 && len(hits) >= cf.limit && tmin > 0 {
+		fmt.Fprintf(w, "next: %s --before %d\n", base, tmin)
+	}
+	if (cf.before != "" || cf.after != "" || cf.since != "") && tmax > 0 {
+		fmt.Fprintf(w, "prev: %s --after %d\n", base, tmax+1)
+	}
+}
+
+// pagerBase rebuilds the invocation minus any time bound (older/newer append
+// their own --before/--after).
+func pagerBase(verb, query string, cf commonFlags) string {
+	parts := []string{"recall", verb}
+	if query != "" {
+		parts = append(parts, strconv.Quote(query))
+	}
+	if cf.repo != "" {
+		parts = append(parts, "--repo", cf.repo)
+	}
+	for _, t := range cf.tags {
+		parts = append(parts, "--tag", t)
+	}
+	if cf.limit > 0 {
+		parts = append(parts, "--limit", strconv.Itoa(cf.limit))
+	}
+	return strings.Join(parts, " ")
 }
 
 func printHits(w io.Writer, hits []Hit) {
@@ -954,5 +1056,6 @@ func runSessions(args []string) error {
 			when, h.Source, truncate(shortProject(h.Project), 30), truncate(h.Title, 60))
 		fmt.Printf("  id=%s\n", h.SessionID)
 	}
+	printPager(os.Stdout, "sessions", "", cf, hits)
 	return nil
 }

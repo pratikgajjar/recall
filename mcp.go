@@ -202,6 +202,8 @@ type toolArgs struct {
 	Repo      string `json:"repo"`
 	Source    string `json:"source"`
 	Since     string `json:"since"`
+	After     string `json:"after"`
+	Before    string `json:"before"`
 	Limit     int    `json:"limit"`
 	Range     string `json:"range"`   // Python-style slice over the message list
 	Outline   bool   `json:"outline"` // outline mode (one line per message)
@@ -226,12 +228,23 @@ func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
 			opts.Project = cwd
 		}
 	}
-	if a.Since != "" {
-		d, err := parseSince(a.Since)
+	lower := a.After
+	if lower == "" {
+		lower = a.Since
+	}
+	if lower != "" {
+		t, err := parseInstant(lower)
 		if err != nil {
 			return opts, err
 		}
-		opts.Since = time.Now().Add(-d).UnixMilli()
+		opts.After = t
+	}
+	if a.Before != "" {
+		t, err := parseInstant(a.Before)
+		if err != nil {
+			return opts, err
+		}
+		opts.Before = t
 	}
 	return opts, nil
 }

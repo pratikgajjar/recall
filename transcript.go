@@ -149,8 +149,30 @@ func renderTranscript(w io.Writer, s *Session, msgs []Message, opts transcriptOp
 		}
 		fmt.Fprintf(w, "## msg %d/%d %s\n%s\n\n", i, total, m.Role, body)
 	}
-	if hi < total {
-		fmt.Fprintf(w, "_… %d more messages. Continue with --range %d:_\n", total-hi, hi)
+	// Same next/prev vocabulary as the cross-session pager, but a --range
+	// fragment (not a full command) since this renderer is shared by `recall
+	// show` and the recall_transcript MCP tool.
+	if lo > 0 || hi < total {
+		span := hi - lo
+		if span <= 0 {
+			span = total
+		}
+		var p []string
+		if hi < total {
+			end := hi + span
+			if end > total {
+				end = total
+			}
+			p = append(p, fmt.Sprintf("next: --range %d:%d", hi, end))
+		}
+		if lo > 0 {
+			start := lo - span
+			if start < 0 {
+				start = 0
+			}
+			p = append(p, fmt.Sprintf("prev: --range %d:%d", start, lo))
+		}
+		fmt.Fprintf(w, "%s  (%d msgs)\n", strings.Join(p, "  "), total)
 	}
 	return nil
 }

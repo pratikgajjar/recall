@@ -138,12 +138,20 @@ Flags can appear anywhere on the line:
 
 ```
 --repo PATH      restrict to a project folder
---since DURATION e.g. 24h, 7d, 30d
+--after WHEN     started after: a duration (7d), epoch-ms, or YYYY-MM-DD
+--before WHEN    started before (pages back through history)
+--since WHEN     alias for --after
 --limit N        default 30
 --tag SELECTOR   filter, repeatable (AND). A user tag, or a reserved facet:
                  source:cursor|claude|codex|pi
 --json           machine-readable output
 ```
+
+`find`, `sessions`, and `show` print terse, copy-pasteable **`next:`/`prev:`**
+page commands at the bottom (text mode) so you — or an agent — can traverse all
+matches. Across sessions it pages by time (`--before`/`--after`); within a
+session it pages by message window (`--range`). `--json` output stays clean; use
+`started_at_ms` to page programmatically.
 
 ### Tags
 
