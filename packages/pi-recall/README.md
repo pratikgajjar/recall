@@ -40,8 +40,14 @@ pi -e ./packages/pi-recall/src/index.ts
 | `recall_transcript` | Read a session in full — by `session_id`, or omit it for the most recent session (filterable by repo/source/since). |
 | `recall_sessions` | List recent sessions (titles + ids, no bodies). |
 | `recall_related` | Given a session id, find other sessions on the same topic. |
+| `recall_tag` / `recall_untag` | Attach/remove durable tags on a session — bookmark sessions worth remembering. Tags survive index rebuilds. |
+| `recall_tags` | List all tags (with counts), or the tags on one session. |
 
-All tools accept `repo` (pass `"."` for the current project), `source` (`cursor` \| `claude` \| `codex` \| `pi`), and `since` (e.g. `7d`).
+All search/list tools accept `repo` (pass `"."` for the current project),
+`source` (`cursor` \| `claude` \| `codex` \| `pi`), `since` (e.g. `7d`), and
+`tags` (filter to sessions carrying ALL given tags; AND). A tag may be a user
+tag or a reserved facet like `source:cursor` — `tags: ["source:cursor"]` is
+equivalent to `source: "cursor"`.
 
 ### Navigating large sessions
 

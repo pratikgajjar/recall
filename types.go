@@ -3,14 +3,13 @@ package main
 import "context"
 
 type Session struct {
-	Source    string         `json:"source"`
-	SourceID  string         `json:"source_id"`
-	Project   string         `json:"project"`
-	Title     string         `json:"title"`
-	StartedAt int64          `json:"started_at_ms"`
-	EndedAt   int64          `json:"ended_at_ms"`
-	MsgCount  int            `json:"msg_count"`
-	Meta      map[string]any `json:"meta,omitempty"`
+	Source    string `json:"source"`
+	SourceID  string `json:"source_id"`
+	Project   string `json:"project"`
+	Title     string `json:"title"`
+	StartedAt int64  `json:"started_at_ms"`
+	EndedAt   int64  `json:"ended_at_ms"`
+	MsgCount  int    `json:"msg_count"`
 
 	// Append marks an incremental update for an already-indexed session:
 	// only the new messages are carried, and ingest appends them to FTS

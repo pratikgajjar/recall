@@ -45,6 +45,9 @@ const SOURCE_HELP = "Restrict to one tool: cursor | claude | codex | pi.";
 const REPO_HELP =
   "Restrict to a project folder. Pass '.' for the current working directory.";
 const SINCE_HELP = "Only sessions newer than this, e.g. '24h', '7d', '30d'.";
+const TAGS_HELP =
+  "Filter to sessions carrying ALL of these tags (AND). A tag is either a user " +
+  "tag (applied with recall_tag) or a reserved facet like 'source:cursor'.";
 
 interface RecallHit {
   session_id: string;
@@ -178,11 +181,15 @@ export default function recallExtension(pi: ExtensionAPI) {
     source?: string;
     since?: string;
     limit?: number;
+    tags?: string[];
   }): string[] {
     const args: string[] = [];
     const repo = resolveRepo(params.repo);
     if (repo) args.push("--repo", repo);
-    if (params.source) args.push("--source", params.source);
+    // `source` is a reserved facet on the unified --tag selector; there is no
+    // separate --source flag on the CLI anymore.
+    if (params.source) args.push("--tag", `source:${params.source}`);
+    for (const t of params.tags ?? []) args.push("--tag", t);
     if (params.since) args.push("--since", params.since);
     if (params.limit !== undefined)
       args.push("--limit", String(Math.max(1, params.limit)));
@@ -299,6 +306,7 @@ export default function recallExtension(pi: ExtensionAPI) {
     repo: Type.Optional(Type.String({ description: REPO_HELP })),
     source: Type.Optional(Type.String({ description: SOURCE_HELP })),
     since: Type.Optional(Type.String({ description: SINCE_HELP })),
+    tags: Type.Optional(Type.Array(Type.String(), { description: TAGS_HELP })),
     limit: Type.Optional(
       Type.Number({ description: `Max hits (default ${DEFAULT_SEARCH_LIMIT})` }),
     ),
@@ -322,6 +330,7 @@ export default function recallExtension(pi: ExtensionAPI) {
         repo: params.repo,
         source: params.source,
         since: params.since,
+        tags: params.tags,
         limit: params.limit ?? DEFAULT_SEARCH_LIMIT,
       })];
       const res = await runRecall(args, signal);
@@ -477,6 +486,7 @@ export default function recallExtension(pi: ExtensionAPI) {
     repo: Type.Optional(Type.String({ description: REPO_HELP })),
     source: Type.Optional(Type.String({ description: SOURCE_HELP })),
     since: Type.Optional(Type.String({ description: SINCE_HELP })),
+    tags: Type.Optional(Type.Array(Type.String(), { description: TAGS_HELP })),
     limit: Type.Optional(
       Type.Number({ description: `Max sessions (default ${DEFAULT_SESSIONS_LIMIT})` }),
     ),
@@ -498,6 +508,7 @@ export default function recallExtension(pi: ExtensionAPI) {
         repo: params.repo,
         source: params.source,
         since: params.since,
+        tags: params.tags,
         limit: params.limit ?? DEFAULT_SESSIONS_LIMIT,
       })];
       const res = await runRecall(args, signal);

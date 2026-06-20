@@ -69,8 +69,28 @@ func openIndexRead(path string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A read handle is query_only, so it can't run migrateSchema (which DROPs/
+	// ALTERs). Guard instead: a stale on-disk schema would make queries return
+	// wrong data (e.g. snippet column indices shift), so refuse rather than lie.
+	// Write opens (index, mcp) migrate on open, so this only trips after a binary
+	// upgrade before the first reindex.
+	var v string
+	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&v)
+	if v != schemaVersion {
+		db.Close()
+		have := v
+		if have == "" {
+			have = "legacy"
+		}
+		return nil, fmt.Errorf("index schema is outdated (%s, want v%s) — run `recall index` to rebuild", have, schemaVersion)
+	}
 	return &Index{db: db}, nil
 }
+
+// schemaVersion bumps when the on-disk schema changes in a way bootstrap can't
+// reach via CREATE IF NOT EXISTS. Each bump triggers a one-shot migration in
+// migrateSchema() (drop legacy FTS, drop dead columns, clear checkpoints).
+const schemaVersion = "3"
 
 func bootstrap(db *sql.DB) error {
 	stmts := []string{
@@ -82,8 +102,7 @@ func bootstrap(db *sql.DB) error {
 			title       TEXT,
 			started_at  INTEGER,
 			ended_at    INTEGER,
-			msg_count   INTEGER,
-			meta        TEXT
+			msg_count   INTEGER
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_project_started
 			ON sessions(project, started_at DESC)`,
@@ -91,11 +110,31 @@ func bootstrap(db *sql.DB) error {
 			ON sessions(started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_source
 			ON sessions(source, started_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`,
+		// session_tags holds user/agent-authored labels. It is durable state:
+		// ingest and migrateSchema NEVER touch it, so tags survive every reindex
+		// (keyed on the stable session id, source:source_id).
+		`CREATE TABLE IF NOT EXISTS session_tags (
+			session_id TEXT NOT NULL,
+			tag        TEXT NOT NULL,
+			created_at INTEGER,
+			PRIMARY KEY (session_id, tag)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return fmt.Errorf("%s: %w", firstLine(s), err)
+		}
+	}
+	if err := migrateSchema(db); err != nil {
+		return fmt.Errorf("migrate schema: %w", err)
+	}
+	ftsStmts := []string{
 		`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 			session_pk UNINDEXED,
 			idx        UNINDEXED,
 			role       UNINDEXED,
-			ts         UNINDEXED,
 			text,
 			tokenize = 'porter unicode61 remove_diacritics 1'
 		)`,
@@ -105,14 +144,76 @@ func bootstrap(db *sql.DB) error {
 			project,
 			tokenize = 'porter unicode61 remove_diacritics 1'
 		)`,
-		`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`,
 	}
-	for _, s := range stmts {
+	for _, s := range ftsStmts {
 		if _, err := db.Exec(s); err != nil {
 			return fmt.Errorf("%s: %w", firstLine(s), err)
 		}
 	}
 	return nil
+}
+
+// migrateSchema brings legacy on-disk schemas up to the current version.
+//
+// History:
+//   - →v2: drop dead columns (messages_fts.ts, sessions.meta). FTS tables
+//     can't be ALTERed, so drop+recreate and clear adapter checkpoints; the
+//     next index run rebuilds FTS rows from source transcripts.
+//   - →v3: add session_tags (created by bootstrap, non-destructive). The bump
+//     just re-stamps the version; no migration step needed here.
+func migrateSchema(db *sql.DB) error {
+	var version string
+	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version)
+	if version == schemaVersion {
+		return nil
+	}
+
+	dirty := false
+	legacy, err := tableHasColumn(db, "messages_fts", "ts")
+	if err != nil {
+		return err
+	}
+	if legacy {
+		if _, err := db.Exec(`DROP TABLE messages_fts`); err != nil {
+			return err
+		}
+		dirty = true
+	}
+	legacy, err = tableHasColumn(db, "sessions", "meta")
+	if err != nil {
+		return err
+	}
+	if legacy {
+		if _, err := db.Exec(`ALTER TABLE sessions DROP COLUMN meta`); err != nil {
+			return fmt.Errorf("drop sessions.meta: %w", err)
+		}
+	}
+	if dirty {
+		// FTS was wiped — force a full reindex by clearing per-adapter checkpoints.
+		if _, err := db.Exec(`DELETE FROM meta WHERE k LIKE 'ckpt:%'`); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO meta(k,v) VALUES('schema_version',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
+		schemaVersion); err != nil {
+		return err
+	}
+	return nil
+}
+
+// tableHasColumn returns true if the named column exists on the table. Works
+// for ordinary tables and FTS5 virtual tables (which expose schema via
+// pragma_table_info).
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, column).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func firstLine(s string) string {
@@ -129,15 +230,14 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer tx.Rollback()
 
-	upsertSess, err := tx.Prepare(`INSERT INTO sessions(id, source, source_id, project, title, started_at, ended_at, msg_count, meta)
-		VALUES(?,?,?,?,?,?,?,?,?)
+	upsertSess, err := tx.Prepare(`INSERT INTO sessions(id, source, source_id, project, title, started_at, ended_at, msg_count)
+		VALUES(?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			project=excluded.project,
 			title=excluded.title,
 			started_at=excluded.started_at,
 			ended_at=excluded.ended_at,
-			msg_count=excluded.msg_count,
-			meta=excluded.meta`)
+			msg_count=excluded.msg_count`)
 	if err != nil {
 		return err
 	}
@@ -149,7 +249,7 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer delFTS.Close()
 
-	insFTS, err := tx.Prepare(`INSERT INTO messages_fts(session_pk, idx, role, ts, text) VALUES(?,?,?,?,?)`)
+	insFTS, err := tx.Prepare(`INSERT INTO messages_fts(session_pk, idx, role, text) VALUES(?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -199,7 +299,7 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 				if text == "" {
 					continue
 				}
-				if _, err := insFTS.Exec(pk, m.Idx, m.Role, m.TS, text); err != nil {
+				if _, err := insFTS.Exec(pk, m.Idx, m.Role, text); err != nil {
 					return fmt.Errorf("append msg %s/%d: %w", pk, m.Idx, err)
 				}
 				added++
@@ -209,12 +309,8 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 			}
 			continue
 		}
-		var metaBlob []byte
-		if len(s.Meta) > 0 {
-			metaBlob, _ = JSONMarshal(s.Meta)
-		}
 		if _, err := upsertSess.Exec(pk, source, s.SourceID, s.Project, s.Title,
-			s.StartedAt, s.EndedAt, s.MsgCount, string(metaBlob)); err != nil {
+			s.StartedAt, s.EndedAt, s.MsgCount); err != nil {
 			return fmt.Errorf("upsert session %s: %w", pk, err)
 		}
 		if _, err := delFTS.Exec(pk); err != nil {
@@ -236,7 +332,7 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 			if text == "" {
 				continue
 			}
-			if _, err := insFTS.Exec(pk, m.Idx, m.Role, m.TS, text); err != nil {
+			if _, err := insFTS.Exec(pk, m.Idx, m.Role, text); err != nil {
 				return fmt.Errorf("insert msg %s/%d: %w", pk, m.Idx, err)
 			}
 		}
@@ -349,6 +445,10 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 		where = append(where, "s.started_at >= ?")
 		args = append(args, opts.Since)
 	}
+	if clause, tagArgs := tagFilterClause("s.id", opts.Tags); clause != "" {
+		where = append(where, clause)
+		args = append(args, tagArgs...)
+	}
 
 	limit := opts.Limit
 	if limit <= 0 {
@@ -370,7 +470,7 @@ SELECT id, source, source_id, project, title, started_at, idx, role, snippet, ra
          COALESCE(s.project,'') AS project, COALESCE(s.title,'') AS title,
          COALESCE(s.started_at,0) AS started_at,
          f.idx AS idx, f.role AS role,
-         snippet(messages_fts, 4, '«', '»', '…', 12) AS snippet,
+         snippet(messages_fts, 3, '«', '»', '…', 12) AS snippet,
          bm25(messages_fts) AS rank
     FROM messages_fts f JOIN sessions s ON s.id = f.session_pk
    WHERE ` + strings.Join(bodyWhere, " AND ") + `
@@ -428,6 +528,10 @@ func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {
 		where = append(where, "project = ?")
 		args = append(args, opts.Project)
 	}
+	if clause, tagArgs := tagFilterClause("id", opts.Tags); clause != "" {
+		where = append(where, clause)
+		args = append(args, tagArgs...)
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 30
@@ -458,6 +562,35 @@ type SearchOpts struct {
 	Since   int64
 	Limit   int
 	AnyTerm bool
+	Tags    []string // session must carry ALL of these tags (AND)
+}
+
+// tagFilterClause builds a WHERE fragment restricting idCol to sessions that
+// carry every tag in tags (AND semantics). Returns "" when no tags are set.
+// idCol is the qualified id column for the surrounding query ("s.id" or "id").
+func tagFilterClause(idCol string, tags []string) (string, []any) {
+	norm := make([]string, 0, len(tags))
+	seen := map[string]bool{}
+	for _, t := range tags {
+		n := normalizeTag(t)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		norm = append(norm, n)
+	}
+	if len(norm) == 0 {
+		return "", nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(norm)), ",")
+	clause := idCol + ` IN (SELECT session_id FROM session_tags WHERE tag IN (` +
+		placeholders + `) GROUP BY session_id HAVING COUNT(DISTINCT tag) = ?)`
+	args := make([]any, 0, len(norm)+1)
+	for _, n := range norm {
+		args = append(args, n)
+	}
+	args = append(args, len(norm))
+	return clause, args
 }
 
 func ftsEscape(q string, anyTerm bool) string {
@@ -631,16 +764,149 @@ func (ix *Index) Close() error { return ix.db.Close() }
 
 func (ix *Index) LookupSession(id string) (*Session, error) {
 	var s Session
-	var meta sql.NullString
 	row := ix.db.QueryRow(`SELECT source, source_id, COALESCE(project,''), COALESCE(title,''),
-		COALESCE(started_at,0), COALESCE(ended_at,0), COALESCE(msg_count,0), meta
+		COALESCE(started_at,0), COALESCE(ended_at,0), COALESCE(msg_count,0)
 		FROM sessions WHERE id = ?`, id)
 	if err := row.Scan(&s.Source, &s.SourceID, &s.Project, &s.Title,
-		&s.StartedAt, &s.EndedAt, &s.MsgCount, &meta); err != nil {
+		&s.StartedAt, &s.EndedAt, &s.MsgCount); err != nil {
 		return nil, err
 	}
-	if meta.Valid && meta.String != "" {
-		_ = JSONUnmarshal([]byte(meta.String), &s.Meta)
-	}
 	return &s, nil
+}
+
+// ─── Tags ─────────────────────────────────────────────────────────────────
+//
+// Tags are durable user/agent state, decoupled from the disposable FTS index:
+// AddTags/RemoveTags write session_tags, which ingest never rebuilds. A tagged
+// session keeps its tags across `recall index --full`.
+
+type TagCount struct {
+	Tag   string `json:"tag"`
+	Count int    `json:"count"`
+}
+
+// sessionExists reports whether a session id is present in the index. Tagging a
+// non-indexed id is almost always a typo, so callers reject it up front.
+func (ix *Index) sessionExists(id string) (bool, error) {
+	var n int
+	if err := ix.db.QueryRow(`SELECT 1 FROM sessions WHERE id = ? LIMIT 1`, id).Scan(&n); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// AddTags attaches one or more tags to a session. Tags are normalised (trimmed,
+// lower-cased); duplicates and blanks are skipped. Returns how many new tags
+// were stored (already-present tags don't count). Errors if the session is not
+// indexed.
+func (ix *Index) AddTags(sessionID string, tags []string) (int, error) {
+	ok, err := ix.sessionExists(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("session %q is not indexed (run `recall index`?)", sessionID)
+	}
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO session_tags(session_id, tag, created_at) VALUES(?,?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	now := time.Now().UnixMilli()
+	added := 0
+	for _, raw := range tags {
+		tag := normalizeTag(raw)
+		if tag == "" {
+			continue
+		}
+		res, err := stmt.Exec(sessionID, tag, now)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
+	}
+	return added, tx.Commit()
+}
+
+// RemoveTags detaches tags from a session. Returns how many rows were removed.
+func (ix *Index) RemoveTags(sessionID string, tags []string) (int, error) {
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`DELETE FROM session_tags WHERE session_id = ? AND tag = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	removed := 0
+	for _, raw := range tags {
+		tag := normalizeTag(raw)
+		if tag == "" {
+			continue
+		}
+		res, err := stmt.Exec(sessionID, tag)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed++
+		}
+	}
+	return removed, tx.Commit()
+}
+
+// SessionTags returns the tags on one session, alphabetically.
+func (ix *Index) SessionTags(sessionID string) ([]string, error) {
+	rows, err := ix.db.Query(`SELECT tag FROM session_tags WHERE session_id = ? ORDER BY tag`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// AllTags returns every tag with its session count, most-used first.
+func (ix *Index) AllTags() ([]TagCount, error) {
+	rows, err := ix.db.Query(`SELECT tag, COUNT(*) FROM session_tags
+		GROUP BY tag ORDER BY 2 DESC, 1 ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TagCount
+	for rows.Next() {
+		var tc TagCount
+		if err := rows.Scan(&tc.Tag, &tc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, tc)
+	}
+	return out, rows.Err()
+}
+
+// normalizeTag canonicalises a tag: trimmed, lower-cased, inner whitespace
+// collapsed to single dashes so `Deploy RCA` and `deploy-rca` are one tag.
+func normalizeTag(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.Join(strings.Fields(s), "-")
 }

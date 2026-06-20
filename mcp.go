@@ -131,7 +131,7 @@ func (s *mcpServer) serve(ctx context.Context, in io.Reader) error {
 
 func (s *mcpServer) handle(ctx context.Context, raw []byte) {
 	var req rpcRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if err := JSONUnmarshal(raw, &req); err != nil {
 		return
 	}
 	isNotification := len(req.ID) == 0
@@ -149,7 +149,7 @@ func (s *mcpServer) handle(ctx context.Context, raw []byte) {
 }
 
 func (s *mcpServer) write(resp rpcResponse) {
-	b, err := json.Marshal(resp)
+	b, err := JSONMarshal(resp)
 	if err != nil {
 		return
 	}
@@ -181,7 +181,7 @@ func (s *mcpServer) initialize(params json.RawMessage) any {
 	var p struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
-	if len(params) > 0 && json.Unmarshal(params, &p) == nil && p.ProtocolVersion != "" {
+	if len(params) > 0 && JSONUnmarshal(params, &p) == nil && p.ProtocolVersion != "" {
 		pv = p.ProtocolVersion // echo the client's version when it sends one
 	}
 	return map[string]any{
@@ -205,11 +205,19 @@ type toolArgs struct {
 	Limit     int    `json:"limit"`
 	Range     string `json:"range"`   // Python-style slice over the message list
 	Outline   bool   `json:"outline"` // outline mode (one line per message)
-	Role      string `json:"role"`    // comma-separated roles: user,assistant,tool
+	Role      string   `json:"role"`           // comma-separated roles: user,assistant,tool
+	Tags      []string `json:"tags"`           // tag filter (search) or tags to add/remove
 }
 
 func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
-	opts := SearchOpts{Source: a.Source, Project: a.Repo, Limit: a.Limit}
+	// Tags may carry a reserved facet (e.g. "source:cursor"); split it out. An
+	// explicit `source` arg still wins if both are given.
+	tags, facetSource := parseSelectors(a.Tags)
+	source := a.Source
+	if source == "" {
+		source = facetSource
+	}
+	opts := SearchOpts{Source: source, Project: a.Repo, Limit: a.Limit, Tags: tags}
 	if opts.Limit <= 0 {
 		opts.Limit = defLimit
 	}
@@ -233,7 +241,7 @@ func (s *mcpServer) toolsCall(ctx context.Context, params json.RawMessage) (any,
 		Name      string   `json:"name"`
 		Arguments toolArgs `json:"arguments"`
 	}
-	if err := json.Unmarshal(params, &call); err != nil {
+	if err := JSONUnmarshal(params, &call); err != nil {
 		return nil, &rpcError{Code: -32602, Message: "invalid params: " + err.Error()}
 	}
 	text, err := s.runTool(ctx, call.Name, call.Arguments)
@@ -277,6 +285,57 @@ func (s *mcpServer) runTool(ctx context.Context, name string, a toolArgs) (strin
 		return hitsText(hits), nil
 	case "recall_transcript":
 		return s.transcript(ctx, a)
+	case "recall_tag":
+		if a.SessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		if len(a.Tags) == 0 {
+			return "", fmt.Errorf("tags is required")
+		}
+		for _, t := range a.Tags {
+			if msg := reservedFacetError(t); msg != "" {
+				return "", fmt.Errorf("%s", msg)
+			}
+		}
+		added, err := s.ix.AddTags(a.SessionID, a.Tags)
+		if err != nil {
+			return "", err
+		}
+		cur, err := s.ix.SessionTags(a.SessionID)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("tagged %s (+%d). tags now: %s", a.SessionID, added, strings.Join(cur, " ")), nil
+	case "recall_untag":
+		if a.SessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		removed, err := s.ix.RemoveTags(a.SessionID, a.Tags)
+		if err != nil {
+			return "", err
+		}
+		cur, err := s.ix.SessionTags(a.SessionID)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("untagged %s (-%d). tags now: %s", a.SessionID, removed, strings.Join(cur, " ")), nil
+	case "recall_tags":
+		if a.SessionID != "" {
+			tags, err := s.ix.SessionTags(a.SessionID)
+			if err != nil {
+				return "", err
+			}
+			return strings.Join(tags, " "), nil
+		}
+		all, err := s.ix.AllTags()
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for _, tc := range all {
+			fmt.Fprintf(&b, "%d\t%s\n", tc.Count, tc.Tag)
+		}
+		return b.String(), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -358,6 +417,11 @@ func mcpTools() []map[string]any {
 	source := strSchema("Restrict to one tool: cursor | claude | codex | pi.")
 	since := strSchema("Only sessions newer than this, e.g. '24h', '7d', '30d'.")
 	limit := map[string]any{"type": "integer", "description": "Max results."}
+	tagsFilter := map[string]any{
+		"type":        "array",
+		"items":       map[string]any{"type": "string"},
+		"description": "Filter selectors, AND-combined. Each is either a user tag (applied with recall_tag) or a reserved facet like 'source:cursor' (cursor|claude|codex|pi). Equivalent to the typed 'source' arg.",
+	}
 
 	return []map[string]any{
 		{
@@ -371,6 +435,7 @@ func mcpTools() []map[string]any {
 					"source": source,
 					"since":  since,
 					"limit":  limit,
+					"tags":   tagsFilter,
 				},
 				"required": []string{"query"},
 			},
@@ -393,7 +458,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "recall_sessions",
-			"description": "List recent past AI sessions (titles + ids, no bodies). Filter by repo/source/since.",
+			"description": "List recent past AI sessions (titles + ids, no bodies). Filter by repo/source/since, or by tags applied with recall_tag.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -401,6 +466,7 @@ func mcpTools() []map[string]any {
 					"source": source,
 					"since":  since,
 					"limit":  limit,
+					"tags":   tagsFilter,
 				},
 			},
 		},
@@ -414,6 +480,48 @@ func mcpTools() []map[string]any {
 					"limit":      limit,
 				},
 				"required": []string{"session_id"},
+			},
+		},
+		{
+			"name":        "recall_tag",
+			"description": "Attach durable tags to a past session so you can find it again later. Tags survive index rebuilds. Get the session_id from recall_search/recall_sessions, then filter by these tags via the 'tags' arg on recall_search/recall_sessions. Use for memory: tag sessions worth remembering (e.g. 'deploy-rca', 'auth-design').",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"session_id": strSchema("Session id to tag (from recall_search/recall_sessions)."),
+					"tags": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "One or more tags to attach. Normalised to lower-case dashed form ('Deploy RCA' → 'deploy-rca').",
+					},
+				},
+				"required": []string{"session_id", "tags"},
+			},
+		},
+		{
+			"name":        "recall_untag",
+			"description": "Remove tags from a session.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"session_id": strSchema("Session id to untag."),
+					"tags": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Tags to remove.",
+					},
+				},
+				"required": []string{"session_id", "tags"},
+			},
+		},
+		{
+			"name":        "recall_tags",
+			"description": "List tags. With no args: every tag and how many sessions carry it. With session_id: the tags on that one session.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"session_id": strSchema("Optional: list tags for just this session."),
+				},
 			},
 		},
 	}

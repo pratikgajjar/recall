@@ -65,8 +65,9 @@ Pure Go, no CGO. Builds a single static binary.
 
 `recall mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server over stdio, so any MCP-capable harness can search your past chats. It
-exposes `recall_search`, `recall_transcript`, `recall_sessions`, and
-`recall_related`, and keeps the index warm in the background.
+exposes `recall_search`, `recall_transcript`, `recall_sessions`, `recall_related`,
+and `recall_tag`/`recall_untag`/`recall_tags`, and keeps the index warm in the
+background.
 
 **Claude Code**
 
@@ -115,7 +116,6 @@ Sessions over 200 messages default to outline when no slice is requested.
 
 ## Commands
 
-```
 recall index                       (re)build the index from all sources
 recall <query>                     search; prints ranked hits
 recall find <query> [--repo P]     same, with filters
@@ -123,6 +123,10 @@ recall last [--repo P]             dump the most recent session as transcript
 recall show <session-id>           dump one session as transcript
 recall sessions [--repo P]         list recent sessions
 recall related <session-id>        sessions on the same topic
+recall tag                         list all tags + counts (git-tag style)
+recall tag <session-id> <tag>…     attach durable tags (survive reindex)
+recall tag -d <session-id> <tag>…  remove tags
+recall tag -l [session-id]         list all tags, or one session's tags
 recall mcp                         run an MCP server (Claude Code, Codex, Cursor, …)
 recall plugin list                show bundled + installed Lua plugins
 recall plugin install <name>      install a bundled plugin into ~/.recall/plugins
@@ -134,11 +138,29 @@ Flags can appear anywhere on the line:
 
 ```
 --repo PATH      restrict to a project folder
---source NAME    cursor | claude | codex
 --since DURATION e.g. 24h, 7d, 30d
 --limit N        default 30
+--tag SELECTOR   filter, repeatable (AND). A user tag, or a reserved facet:
+                 source:cursor|claude|codex|pi
 --json           machine-readable output
 ```
+
+### Tags
+
+Tag any session to find it again later — tags are **durable**: they live in a
+separate table the indexer never rebuilds, so they survive `recall index --full`.
+
+```bash
+recall tag cursor:94dc8775-… deploy-rca auth-design   # remember this session
+recall sessions --tag deploy-rca                      # find tagged sessions
+recall sessions --tag deploy-rca --tag source:cursor  # tag + facet, AND
+```
+
+`source` is exposed as a reserved **facet** through the same `--tag` selector
+(`--tag source:cursor`) rather than a separate flag — one filter vocabulary,
+k8s-label style. Reserved facets are derived from the session, so you can filter
+by them but can't author them as tags. Agents can tag via the `recall_tag` MCP
+tool to bookmark sessions worth remembering.
 
 ## What it reads
 

@@ -42,6 +42,10 @@ USAGE
   recall show <session-id>         full transcript of one session (re-read from source)
   recall sessions [flags]          list sessions, no body
   recall related <session-id>      sessions covering the same topic as this one
+  recall tag                       list all tags + counts (git-tag style)
+  recall tag <session-id> <tag>…   attach durable tags (survive reindex)
+  recall tag -d <session-id> <tag>…  remove tags
+  recall tag -l [session-id]       list all tags, or one session's tags
   recall open <session-id>         reopen in the source tool (cursor://, claude --resume, …)
   recall stats [flags]             session/message counts by source/project
   recall index [--full]            (re)build the local index from all sources
@@ -51,21 +55,25 @@ USAGE
 
 FLAGS
   --repo PATH                      restrict to a specific project folder
-  --source cursor|claude|codex|pi  restrict to one adapter
   --since DURATION                 e.g. 24h, 7d
   --limit N                        default 30
+  --tag SELECTOR                   filter, repeatable (AND). A user tag, or a
+                                   reserved facet: source:cursor|claude|codex|pi
   --json                           machine-readable output (snake_case)
 
 EXAMPLES
   recall "remote chat"                                # all sources, all repos
   recall "remote chat" --repo ~/code/acme-api  # one project
-  recall "remote chat" --source pi --since 30d        # one tool, recent
+  recall "remote chat" --tag source:pi --since 30d    # one tool, recent
   recall last --repo .                                # most recent here, full
   recall related cursor:bc9f2a9b-…                    # neighbour topics
   recall stats --since 7d                             # what did I work on this week?
+  recall tag pi:019ed75b-… deploy-rca                 # remember this session
+  recall sessions --tag deploy-rca                    # find tagged sessions
+  recall sessions --tag source:cursor --tag deploy-rca  # facet + tag, AND
 
 DATA
-  index    ~/.recall/index.sqlite   (disposable — rebuild any time)
+  index    ~/.recall/index.sqlite   (disposable — rebuild any time; tags persist)
   sources  Cursor SQLite KV, Claude/Codex/pi JSONL files
            (read-only — recall never mutates source data)
 `, recallVersion())
@@ -122,6 +130,10 @@ func main() {
 		}
 	case "mcp":
 		if err := runMCP(args); err != nil {
+			fatal(err)
+		}
+	case "tag":
+		if err := runTag(args); err != nil {
 			fatal(err)
 		}
 	case "plugin":
@@ -184,20 +196,64 @@ func mergeAdapters(builtins, plugins []Adapter) []Adapter {
 	return out
 }
 
+// stringSlice is a repeatable string flag: `--tag a --tag b` collects [a, b].
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 type commonFlags struct {
-	repo   string
-	source string
-	since  string
-	limit  int
-	json   bool
+	repo  string
+	since string
+	limit int
+	json  bool
+	tags  stringSlice
 }
 
 func (cf *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&cf.repo, "repo", "", "restrict to a project folder")
-	fs.StringVar(&cf.source, "source", "", "cursor | claude | codex")
 	fs.StringVar(&cf.since, "since", "", "e.g. 24h, 7d, 30d")
 	fs.IntVar(&cf.limit, "limit", 30, "max results")
 	fs.BoolVar(&cf.json, "json", false, "machine-readable output")
+	fs.Var(&cf.tags, "tag", "filter selector, repeatable (AND): a user tag, or a\n\treserved facet like source:cursor")
+}
+
+// reservedFacets maps a selector prefix (before ':') to the sessions column it
+// filters. These are DERIVED facets — read-only, regenerated each ingest — so
+// they can be queried through --tag but never authored as a tag.
+var reservedFacets = map[string]string{"source": "source", "src": "source"}
+
+// parseSelectors splits --tag tokens into user tags (session_tags rows) and
+// reserved facet values (sessions columns). A token "key:value" whose key is
+// reserved routes to the facet; everything else is a user tag — so a user tag
+// may still contain ':' as long as its prefix isn't a reserved facet.
+func parseSelectors(tokens []string) (tags []string, source string) {
+	for _, t := range tokens {
+		if k, v, ok := strings.Cut(t, ":"); ok {
+			if facet := reservedFacets[strings.ToLower(strings.TrimSpace(k))]; facet != "" {
+				if facet == "source" {
+					source = strings.ToLower(strings.TrimSpace(v))
+				}
+				continue
+			}
+		}
+		tags = append(tags, t)
+	}
+	return
+}
+
+// reservedFacetError rejects authoring a reserved facet as a tag. Returns "" if
+// the token is a legal user tag.
+func reservedFacetError(token string) string {
+	if k, _, ok := strings.Cut(token, ":"); ok {
+		if facet := reservedFacets[strings.ToLower(strings.TrimSpace(k))]; facet != "" {
+			return fmt.Sprintf("%q is a reserved facet (derived from the session, not a tag); filter with `--tag %s` instead", token, token)
+		}
+	}
+	return ""
 }
 
 func splitFlagsAndArgs(in []string, boolFlags map[string]bool) (flags, positional []string) {
@@ -227,10 +283,12 @@ func splitFlagsAndArgs(in []string, boolFlags map[string]bool) (flags, positiona
 var sharedBoolFlags = map[string]bool{"json": true, "outline": true}
 
 func (cf *commonFlags) toSearchOpts() (SearchOpts, error) {
+	tags, source := parseSelectors(cf.tags)
 	opts := SearchOpts{
-		Source:  cf.source,
+		Source:  source,
 		Project: cf.repo,
 		Limit:   cf.limit,
+		Tags:    tags,
 	}
 	if cf.since != "" {
 		d, err := parseSince(cf.since)
@@ -259,6 +317,120 @@ func openIndexOrFail() (*Index, error) {
 		return nil, errors.New("no index yet — run `recall index` first")
 	}
 	return openIndexRead(path)
+}
+
+// openIndexWriteOrFail opens the index for writing (tags). Unlike search, which
+// uses a read-only handle, tagging mutates session_tags.
+func openIndexWriteOrFail() (*Index, error) {
+	path := defaultIndexPath()
+	if _, err := os.Stat(path); err != nil {
+		return nil, errors.New("no index yet — run `recall index` first")
+	}
+	return openIndex(path)
+}
+
+// runTag: recall tag <session-id> <tag>...
+// runTag follows the `git tag` model — one verb, mode by flag:
+//
+//	recall tag                      list all tags + counts (like bare `git tag`)
+//	recall tag -l [session-id]      list all, or one session's tags
+//	recall tag <session-id> <tag>…  attach tags
+//	recall tag -d <session-id> <tag>…  remove tags
+func runTag(args []string) error {
+	flagArgs, pos := splitFlagsAndArgs(args, map[string]bool{"d": true, "l": true, "json": true})
+	fs := flag.NewFlagSet("tag", flag.ExitOnError)
+	del := fs.Bool("d", false, "delete the given tags from the session")
+	list := fs.Bool("l", false, "list tags (all, or for one session)")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+
+	// List mode: explicit -l, or no positionals at all (bare `recall tag`), or a
+	// lone session id with no tags to add.
+	if *list || len(pos) == 0 || (!*del && len(pos) == 1) {
+		return listTags(pos, *asJSON)
+	}
+
+	if len(pos) < 2 {
+		return errors.New("usage: recall tag <session-id> <tag>...  (or -d to remove, -l to list)")
+	}
+	id, tags := pos[0], pos[1:]
+	for _, t := range tags {
+		if msg := reservedFacetError(t); msg != "" {
+			return errors.New(msg)
+		}
+	}
+	ix, err := openIndexWriteOrFail()
+	if err != nil {
+		return err
+	}
+	defer ix.Close()
+
+	if *del {
+		removed, err := ix.RemoveTags(id, tags)
+		if err != nil {
+			return err
+		}
+		cur, err := ix.SessionTags(id)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("untagged %s (-%d) → %s\n", id, removed, strings.Join(cur, " "))
+		return nil
+	}
+
+	added, err := ix.AddTags(id, tags)
+	if err != nil {
+		return err
+	}
+	cur, err := ix.SessionTags(id)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("tagged %s (+%d) → %s\n", id, added, strings.Join(cur, " "))
+	return nil
+}
+
+// listTags backs `recall tag -l`: all tags with counts, or one session's tags.
+func listTags(pos []string, asJSON bool) error {
+	ix, err := openIndexOrFail()
+	if err != nil {
+		return err
+	}
+	defer ix.Close()
+
+	if len(pos) > 0 {
+		tags, err := ix.SessionTags(pos[0])
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			return JSONNewEncoder(os.Stdout).Encode(tags)
+		}
+		if len(tags) == 0 {
+			fmt.Println("no tags")
+			return nil
+		}
+		fmt.Println(strings.Join(tags, " "))
+		return nil
+	}
+
+	all, err := ix.AllTags()
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return JSONNewEncoder(os.Stdout).Encode(all)
+	}
+	if len(all) == 0 {
+		fmt.Println("no tags yet — tag a session with `recall tag <session-id> <tag>`")
+		return nil
+	}
+	for _, tc := range all {
+		fmt.Printf("%4d  %s\n", tc.Count, tc.Tag)
+	}
+	return nil
 }
 
 func runIndex(args []string) error {
@@ -759,7 +931,7 @@ func runSessions(args []string) error {
 		return err
 	}
 
-	if cf.repo == "" && cf.source == "" && cf.since == "" {
+	if cf.repo == "" && cf.since == "" && opts.Source == "" && len(opts.Tags) == 0 {
 		if cwd, err := os.Getwd(); err == nil {
 			opts.Project = cwd
 		}
