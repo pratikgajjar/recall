@@ -728,7 +728,10 @@ func printPager(w io.Writer, verb, query string, cf commonFlags, hits []Hit) {
 		}
 	}
 	base := pagerBase(verb, query, cf)
-	if cf.limit > 0 && len(hits) >= cf.limit && tmin > 0 {
+	// Always offer the older page when there's a time cursor: per-session dedup
+	// makes len(hits) an unreliable "is there more" signal, and keyset paging
+	// self-terminates (an empty older page prints no footer of its own).
+	if tmin > 0 {
 		fmt.Fprintf(w, "next: %s --before %d\n", base, tmin)
 	}
 	if (cf.before != "" || cf.after != "" || cf.since != "") && tmax > 0 {
