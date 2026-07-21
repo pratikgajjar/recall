@@ -219,7 +219,7 @@ func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
 	if source == "" {
 		source = facetSource
 	}
-	opts := SearchOpts{Source: source, Project: resolveRepo(a.Repo), Limit: a.Limit, Tags: tags}
+	opts := SearchOpts{Source: source, Project: resolveRepo(a.Repo), Limit: a.Limit, Tags: tags, SessionID: a.SessionID}
 	if opts.Limit <= 0 {
 		opts.Limit = defLimit
 	}
@@ -269,6 +269,9 @@ func (s *mcpServer) runTool(ctx context.Context, name string, a toolArgs) (strin
 	case "recall_search":
 		opts, err := a.opts(15)
 		if err != nil {
+			return "", err
+		}
+		if err := resolveSessionDot(s.ix, &opts); err != nil {
 			return "", err
 		}
 		hits, err := s.ix.Search(a.Query, opts)
@@ -443,12 +446,13 @@ func mcpTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query":  strSchema("Full-text search over past conversations (titles + message excerpts). Use concrete identifiers, error strings, or feature names."),
-					"repo":   repo,
-					"source": source,
-					"since":  since,
-					"limit":  limit,
-					"tags":   tagsFilter,
+					"query":      strSchema("Full-text search over past conversations (titles + message excerpts). Use concrete identifiers, error strings, or feature names."),
+					"session_id": strSchema("Restrict the search to one session. Pass '.' for the current/newest session in this repo — useful to find something said earlier in a long session after context compaction."),
+					"repo":       repo,
+					"source":     source,
+					"since":      since,
+					"limit":      limit,
+					"tags":       tagsFilter,
 				},
 				"required": []string{"query"},
 			},

@@ -442,6 +442,10 @@ func (ix *Index) searchMatch(ftsQuery string, opts SearchOpts) ([]Hit, error) {
 
 	args := []any{ftsQuery}
 	where := []string{"messages_fts MATCH ?"}
+	if opts.SessionID != "" {
+		where = append(where, "s.id = ?")
+		args = append(args, opts.SessionID)
+	}
 	if opts.Source != "" {
 		where = append(where, "s.source = ?")
 		args = append(args, opts.Source)
@@ -533,6 +537,10 @@ LIMIT ?`
 func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {
 	where := []string{"1=1"}
 	var args []any
+	if opts.SessionID != "" {
+		where = append(where, "id = ?")
+		args = append(args, opts.SessionID)
+	}
 	if opts.Source != "" {
 		where = append(where, "source = ?")
 		args = append(args, opts.Source)
@@ -578,12 +586,13 @@ func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {
 }
 
 type SearchOpts struct {
-	Source  string
-	Project string
-	After   int64 // started_at >= After (lower bound; --since is an alias)
-	Before  int64 // started_at <  Before (upper bound; for keyset paging)
-	Limit   int
-	Tags    []string // session must carry ALL of these tags (AND)
+	Source    string
+	Project   string
+	After     int64 // started_at >= After (lower bound; --since is an alias)
+	Before    int64 // started_at <  Before (upper bound; for keyset paging)
+	Limit     int
+	Tags      []string // session must carry ALL of these tags (AND)
+	SessionID string   // restrict to one session (search inside a transcript)
 }
 
 // tagFilterClause builds a WHERE fragment restricting idCol to sessions that

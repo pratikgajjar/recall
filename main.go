@@ -208,6 +208,7 @@ func (s *stringSlice) Set(v string) error {
 
 type commonFlags struct {
 	repo   string
+	in     string
 	since  string
 	after  string
 	before string
@@ -218,6 +219,7 @@ type commonFlags struct {
 
 func (cf *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&cf.repo, "repo", "", "restrict to a project folder")
+	fs.StringVar(&cf.in, "in", "", "restrict to one session id (search inside a transcript);\n\t\".\" = the newest session for this repo")
 	fs.StringVar(&cf.since, "since", "", "alias for --after (lower time bound)")
 	fs.StringVar(&cf.after, "after", "", "only sessions started after this: 7d, an epoch-ms, or YYYY-MM-DD")
 	fs.StringVar(&cf.before, "before", "", "only sessions started before this (for paging back through history)")
@@ -317,10 +319,11 @@ var sharedBoolFlags = map[string]bool{"json": true, "outline": true}
 func (cf *commonFlags) toSearchOpts() (SearchOpts, error) {
 	tags, source := parseSelectors(cf.tags)
 	opts := SearchOpts{
-		Source:  source,
-		Project: resolveRepo(cf.repo),
-		Limit:   cf.limit,
-		Tags:    tags,
+		Source:    source,
+		Project:   resolveRepo(cf.repo),
+		SessionID: cf.in,
+		Limit:     cf.limit,
+		Tags:      tags,
 	}
 	// --since is a permanent alias for --after (lower time bound). --after wins
 	// if both are given.
@@ -703,6 +706,32 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
 }
 
+// resolveSessionDot turns SessionID "." into the newest indexed session for
+// the current repo (falling back to newest anywhere), so `recall find --in .`
+// means "search inside the session I am in right now" — the on-disk transcript
+// survives context compaction, so this recovers what the agent forgot.
+func resolveSessionDot(ix *Index, opts *SearchOpts) error {
+	if opts.SessionID != "." {
+		return nil
+	}
+	probe := SearchOpts{Limit: 1}
+	if cwd, err := os.Getwd(); err == nil {
+		probe.Project = resolveRepo(cwd)
+	}
+	hits, err := ix.Search("", probe)
+	if err == nil && len(hits) == 0 && probe.Project != "" {
+		hits, err = ix.Search("", SearchOpts{Limit: 1})
+	}
+	if err != nil {
+		return err
+	}
+	if len(hits) == 0 {
+		return fmt.Errorf("no sessions indexed yet")
+	}
+	opts.SessionID = hits[0].SessionID
+	return nil
+}
+
 func runFind(args []string) error {
 	fs := flag.NewFlagSet("find", flag.ExitOnError)
 	var cf commonFlags
@@ -718,6 +747,9 @@ func runFind(args []string) error {
 	}
 	ix, err := openIndexOrFail()
 	if err != nil {
+		return err
+	}
+	if err := resolveSessionDot(ix, &opts); err != nil {
 		return err
 	}
 	defer ix.Close()
@@ -775,6 +807,9 @@ func pagerBase(verb, query string, cf commonFlags) string {
 	}
 	if cf.repo != "" {
 		parts = append(parts, "--repo", cf.repo)
+	}
+	if cf.in != "" {
+		parts = append(parts, "--in", cf.in)
 	}
 	for _, t := range cf.tags {
 		parts = append(parts, "--tag", t)
