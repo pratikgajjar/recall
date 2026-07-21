@@ -116,22 +116,22 @@ Sessions over 200 messages default to outline when no slice is requested.
 
 ## Commands
 
-recall index                       (re)build the index from all sources
-recall <query>                     search; prints ranked hits
-recall find <query> [--repo P]     same, with filters
-recall last [--repo P]             dump the most recent session as transcript
-recall show <session-id>           dump one session as transcript
+```
+recall <query>                     search; prints ranked hits (alias: 'find')
+recall last [--repo P]             full transcript of the most recent matching session
+recall show <session-id>           full transcript of one session
 recall sessions [--repo P]         list recent sessions
 recall related <session-id>        sessions on the same topic
+recall open <session-id>           reopen in the source tool (cursor://, claude --resume, …)
 recall tag                         list all tags + counts (git-tag style)
 recall tag <session-id> <tag>…     attach durable tags (survive reindex)
 recall tag -d <session-id> <tag>…  remove tags
-recall tag -l [session-id]         list all tags, or one session's tags
+recall stats [flags]               session/message counts by source/project
+recall index [--full]              (re)build the index from all sources
 recall mcp                         run an MCP server (Claude Code, Codex, Cursor, …)
-recall plugin list                show bundled + installed Lua plugins
-recall plugin install <name>      install a bundled plugin into ~/.recall/plugins
-recall plugin test <file>         dry-run a plugin: print the records it produces
-recall doctor                     health check
+recall plugin list                 show bundled + installed Lua plugins
+recall plugin install <name>       install a bundled plugin into ~/.recall/plugins
+recall doctor                      health check
 ```
 
 Flags can appear anywhere on the line:
@@ -208,6 +208,7 @@ plugin is skipped without blocking the others. Kinds: `line` (JSONL), `file`
 See [`plugins/`](plugins/) for examples and
 [`architecture.md`](architecture.md) for the full contract.
 
+## Design
 
 - **Read-only.** Sources stay the source of truth.
 - **No materialization.** No markdown copies, no canonical schema migrations.
