@@ -429,7 +429,7 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 		return ix.recent(opts)
 	}
 
-	ftsQuery := ftsEscape(query, opts.AnyTerm)
+	ftsQuery := ftsEscape(query)
 
 	args := []any{ftsQuery}
 	where := []string{"messages_fts MATCH ?"}
@@ -574,7 +574,6 @@ type SearchOpts struct {
 	After   int64 // started_at >= After (lower bound; --since is an alias)
 	Before  int64 // started_at <  Before (upper bound; for keyset paging)
 	Limit   int
-	AnyTerm bool
 	Tags    []string // session must carry ALL of these tags (AND)
 }
 
@@ -606,7 +605,7 @@ func tagFilterClause(idCol string, tags []string) (string, []any) {
 	return clause, args
 }
 
-func ftsEscape(q string, anyTerm bool) string {
+func ftsEscape(q string) string {
 	fields := strings.Fields(q)
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -625,11 +624,10 @@ func ftsEscape(q string, anyTerm bool) string {
 	if len(out) == 0 {
 		return `""`
 	}
-	sep := " AND "
-	if anyTerm {
-		sep = " OR "
-	}
-	return strings.Join(out, sep)
+	// OR-join every term: a keyword dump matches "any of these", and bm25
+	// (ORDER BY rank ASC) ranks a session covering the most — and rarest —
+	// query terms highest, so one hitting all N words sorts above fewer.
+	return strings.Join(out, " OR ")
 }
 
 type StatRow struct {
@@ -710,7 +708,7 @@ func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 		return nil, fmt.Errorf("session %s not found or empty", id)
 	}
 	query := topTerms(title+" "+strings.Join(snippets, " "), 6)
-	hits, err := ix.Search(query, SearchOpts{Limit: limit + 1, AnyTerm: true})
+	hits, err := ix.Search(query, SearchOpts{Limit: limit + 1})
 	if err != nil {
 		return nil, err
 	}
