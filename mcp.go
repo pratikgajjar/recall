@@ -197,18 +197,18 @@ func (s *mcpServer) initialize(params json.RawMessage) any {
 // --- tools -----------------------------------------------------------------
 
 type toolArgs struct {
-	Query     string `json:"query"`
-	SessionID string `json:"session_id"`
-	Repo      string `json:"repo"`
-	Source    string `json:"source"`
-	Since     string `json:"since"`
-	After     string `json:"after"`
-	Before    string `json:"before"`
-	Limit     int    `json:"limit"`
-	Range     string `json:"range"`   // Python-style slice over the message list
-	Outline   bool   `json:"outline"` // outline mode (one line per message)
-	Role      string   `json:"role"`           // comma-separated roles: user,assistant,tool
-	Tags      []string `json:"tags"`           // tag filter (search) or tags to add/remove
+	Query     string   `json:"query"`
+	SessionID string   `json:"session_id"`
+	Repo      string   `json:"repo"`
+	Source    string   `json:"source"`
+	Since     string   `json:"since"`
+	After     string   `json:"after"`
+	Before    string   `json:"before"`
+	Limit     int      `json:"limit"`
+	Range     string   `json:"range"`   // Python-style slice over the message list
+	Outline   bool     `json:"outline"` // outline mode (one line per message)
+	Role      string   `json:"role"`    // comma-separated roles: user,assistant,tool
+	Tags      []string `json:"tags"`    // tag filter (search) or tags to add/remove
 }
 
 func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
@@ -219,13 +219,13 @@ func (a toolArgs) opts(defLimit int) (SearchOpts, error) {
 	if source == "" {
 		source = facetSource
 	}
-	opts := SearchOpts{Source: source, Project: a.Repo, Limit: a.Limit, Tags: tags}
+	opts := SearchOpts{Source: source, Project: resolveRepo(a.Repo), Limit: a.Limit, Tags: tags}
 	if opts.Limit <= 0 {
 		opts.Limit = defLimit
 	}
 	if a.Repo == "." {
 		if cwd, err := os.Getwd(); err == nil {
-			opts.Project = cwd
+			opts.Project = resolveRepo(cwd)
 		}
 	}
 	lower := a.After
@@ -364,7 +364,7 @@ func (s *mcpServer) transcript(ctx context.Context, a toolArgs) (string, error) 
 		opts.Limit = 1
 		if opts.Project == "" {
 			if cwd, err := os.Getwd(); err == nil {
-				opts.Project = cwd
+				opts.Project = resolveRepo(cwd)
 			}
 		}
 		hits, err := s.ix.Search("", opts)

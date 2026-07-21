@@ -428,8 +428,17 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return ix.recent(opts)
 	}
+	terms := ftsTerms(query)
+	// AND first: cheap and precise. Only when nothing matches all terms does
+	// the expensive any-of-these OR pass run (keyword dumps, partial recall).
+	hits, err := ix.searchMatch(strings.Join(terms, " "), opts)
+	if err == nil && len(hits) == 0 && len(terms) > 1 {
+		hits, err = ix.searchMatch(strings.Join(terms, " OR "), opts)
+	}
+	return hits, err
+}
 
-	ftsQuery := ftsEscape(query)
+func (ix *Index) searchMatch(ftsQuery string, opts SearchOpts) ([]Hit, error) {
 
 	args := []any{ftsQuery}
 	where := []string{"messages_fts MATCH ?"}
@@ -438,8 +447,8 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 		args = append(args, opts.Source)
 	}
 	if opts.Project != "" {
-		where = append(where, "s.project = ?")
-		args = append(args, opts.Project)
+		where = append(where, "(s.project = ? OR s.project LIKE ? || '/%')")
+		args = append(args, opts.Project, opts.Project)
 	}
 	if opts.After > 0 {
 		where = append(where, "s.started_at >= ?")
@@ -529,8 +538,8 @@ func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {
 		args = append(args, opts.Source)
 	}
 	if opts.Project != "" {
-		where = append(where, "project = ?")
-		args = append(args, opts.Project)
+		where = append(where, "(project = ? OR project LIKE ? || '/%')")
+		args = append(args, opts.Project, opts.Project)
 	}
 	if opts.After > 0 {
 		where = append(where, "started_at >= ?")
@@ -605,29 +614,36 @@ func tagFilterClause(idCol string, tags []string) (string, []any) {
 	return clause, args
 }
 
-func ftsEscape(q string) string {
-	fields := strings.Fields(q)
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		f = strings.Map(func(r rune) rune {
+// ftsTerms splits a query into FTS5-safe quoted units. User-quoted spans stay
+// exact phrases; bare words become individual terms.
+func ftsTerms(q string) []string {
+	var out []string
+	clean := func(s string) string {
+		return strings.Map(func(r rune) rune {
 			switch r {
 			case '"', '*', ':', '(', ')':
 				return -1
 			}
 			return r
-		}, f)
-		if f == "" {
+		}, s)
+	}
+	for i, span := range strings.Split(q, `"`) {
+		if i%2 == 1 { // inside user quotes
+			if p := strings.TrimSpace(clean(span)); p != "" {
+				out = append(out, `"`+p+`"`)
+			}
 			continue
 		}
-		out = append(out, `"`+f+`"`)
+		for _, f := range strings.Fields(span) {
+			if f = clean(f); f != "" {
+				out = append(out, `"`+f+`"`)
+			}
+		}
 	}
 	if len(out) == 0 {
-		return `""`
+		out = append(out, `""`)
 	}
-	// OR-join every term: a keyword dump matches "any of these", and bm25
-	// (ORDER BY rank ASC) ranks a session covering the most — and rarest —
-	// query terms highest, so one hitting all N words sorts above fewer.
-	return strings.Join(out, " OR ")
+	return out
 }
 
 type StatRow struct {
@@ -645,8 +661,8 @@ func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 		args = append(args, opts.Source)
 	}
 	if opts.Project != "" {
-		where = append(where, "project = ?")
-		args = append(args, opts.Project)
+		where = append(where, "(project = ? OR project LIKE ? || '/%')")
+		args = append(args, opts.Project, opts.Project)
 	}
 	if opts.After > 0 {
 		where = append(where, "started_at >= ?")

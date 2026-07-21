@@ -70,6 +70,10 @@ if [[ "$WITH_FULL" -eq 1 ]]; then
   rm -rf "$HOME/.recall"
   t=$( { /usr/bin/time -p ./recall index >/dev/null; } 2>&1 | awk '/^real/ {print $2}' )
   full_s="$t"
+  if [[ -z "$full_s" ]]; then
+    echo "bench.sh: --full ran but full_index_seconds is empty (time/awk parse failed?)" >&2
+    exit 1
+  fi
 fi
 
 # Counts after run (validates the index didn't silently drop sessions).

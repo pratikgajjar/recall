@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -158,5 +160,43 @@ func TestSearchTitleAndProjectFilter(t *testing.T) {
 	}
 	if len(scoped) != 1 || scoped[0].SessionID != "pi:sess-f2" {
 		t.Fatalf("project filter failed: %+v", scoped)
+	}
+}
+
+func TestFtsTerms(t *testing.T) {
+	cases := map[string]string{
+		"import cycle":           `"import"|"cycle"`,
+		`"import cycle"`:         `"import cycle"`,
+		`fix "import cycle" now`: `"fix"|"import cycle"|"now"`,
+		`we:ird (chars)*`:        `"weird"|"chars"`,
+		``:                       `""`,
+		`"unclosed phrase`:       `"unclosed phrase"`,
+	}
+	for in, want := range cases {
+		if got := strings.Join(ftsTerms(in), "|"); got != want {
+			t.Errorf("ftsTerms(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResolveRepo(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "src", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveRepo(sub); got != root {
+		t.Errorf("resolveRepo(%q) = %q, want %q", sub, got, root)
+	}
+	// no .git anywhere above: returns the abs input unchanged
+	bare := t.TempDir()
+	if got := resolveRepo(bare); got != bare {
+		t.Errorf("resolveRepo(%q) = %q, want same", bare, got)
+	}
+	if got := resolveRepo(""); got != "" {
+		t.Errorf("resolveRepo(\"\") = %q, want \"\"", got)
 	}
 }

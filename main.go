@@ -285,13 +285,40 @@ func splitFlagsAndArgs(in []string, boolFlags map[string]bool) (flags, positiona
 	return
 }
 
+// resolveRepo normalizes a --repo value: expands ~, makes it absolute, and
+// walks up to the enclosing git root so `--repo .` from a subdirectory means
+// the whole repo. Returns "" unchanged.
+func resolveRepo(p string) string {
+	if p == "" {
+		return ""
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[1:])
+		}
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	for d := p; ; {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return p
+		}
+		d = parent
+	}
+}
+
 var sharedBoolFlags = map[string]bool{"json": true, "outline": true}
 
 func (cf *commonFlags) toSearchOpts() (SearchOpts, error) {
 	tags, source := parseSelectors(cf.tags)
 	opts := SearchOpts{
 		Source:  source,
-		Project: cf.repo,
+		Project: resolveRepo(cf.repo),
 		Limit:   cf.limit,
 		Tags:    tags,
 	}
@@ -811,7 +838,7 @@ func runLast(args []string) error {
 	opts.Limit = 1
 	if opts.Project == "" {
 		if cwd, err := os.Getwd(); err == nil {
-			opts.Project = cwd
+			opts.Project = resolveRepo(cwd)
 		}
 	}
 	ix, err := openIndexOrFail()
@@ -1038,7 +1065,7 @@ func runSessions(args []string) error {
 
 	if cf.repo == "" && cf.since == "" && opts.Source == "" && len(opts.Tags) == 0 {
 		if cwd, err := os.Getwd(); err == nil {
-			opts.Project = cwd
+			opts.Project = resolveRepo(cwd)
 		}
 	}
 	ix, err := openIndexOrFail()
