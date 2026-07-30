@@ -85,6 +85,13 @@ return {
 The three kinds — `line` (JSONL, offset-resumable), `file` (whole-file), and `kv`
 (SQLite key/value) — all return the same `Session`/`Message` shape.
 
+**Usage fields are optional.** A plugin that knows what a session cost may also
+set `model`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `cost_usd`
+on the session table (line kind: on `st`). recall never derives cost from a
+price list of its own — it only reports what a source recorded. Omit them and
+ingest estimates tokens from the transcript's character count instead, flagging
+the row `estimated` so the UI can print it as `~`.
+
 ### recall.* helpers (the entire host API)
 
 | Helper | Purpose |

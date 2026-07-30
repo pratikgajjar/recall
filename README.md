@@ -126,7 +126,7 @@ recall open <session-id>           reopen in the source tool (cursor://, claude 
 recall tag                         list all tags + counts (git-tag style)
 recall tag <session-id> <tag>…     attach durable tags (survive reindex)
 recall tag -d <session-id> <tag>…  remove tags
-recall stats [flags]               session/message counts by source/project
+recall stats [flags]               sessions/messages/tokens/cost by source, project, model
 recall index [--full]              (re)build the index from all sources
 recall mcp                         run an MCP server (Claude Code, Codex, Cursor, …)
 recall plugin list                 show bundled + installed Lua plugins
@@ -146,6 +146,9 @@ Flags can appear anywhere on the line:
                  source:cursor|claude|codex|pi
 --json           machine-readable output
 ```
+
+`stats` also takes `--projects N` / `--models N` (rows per table, `0` = all)
+and `--csv <prefix>` (see below).
 
 `find`, `sessions`, and `show` print terse, copy-pasteable **`next:`/`prev:`**
 page commands at the bottom (text mode) so you — or an agent — can traverse all
@@ -169,6 +172,63 @@ recall sessions --tag deploy-rca --tag source:cursor  # tag + facet, AND
 k8s-label style. Reserved facets are derived from the session, so you can filter
 by them but can't author them as tags. Agents can tag via the `recall_tag` MCP
 tool to bookmark sessions worth remembering.
+
+### Tokens and cost
+
+`recall stats` reports what your sessions actually cost, rolled up by source,
+project, and model:
+
+```
+$ recall stats --projects 2 --models 4
+SOURCE  SESSIONS  MESSAGES  TOKENS  COST        PROJECT
+pi      686       313807    31.3B   $17190.19   (all)
+        20        69379     5.7B    $2701.57      ~/code/txn-store
+        187       68149     6.7B    $2273.09      ~/code/vegapunk-go
+                                                  … 73 more (--projects 0)
+codex   1088      37493     771.4M  -           (all)
+
+MODEL                SOURCE  SESSIONS  TOKENS  CACHED  COST
+claude-opus-4-8      pi      192       8.2B    96%     $6687.34
+claude-opus-4-7      pi      122       7.2B    96%     $2732.05
+gpt-5.6-sol          codex   18        415.5M  93%     -
+… 68 more
+```
+
+Nothing here is computed from a price list recall carries — there isn't one.
+Every number is read back out of what the tool itself recorded:
+
+| Source | Model | Tokens | Cost |
+|---|---|---|---|
+| pi | `message.model` | per-message `usage` summed over turns | `usage.cost.total`, priced by pi |
+| codex | `turn_context.model` | `token_count` running total | — (subscription; codex logs quota %, not dollars) |
+| cursor | `modelConfig.modelName` | `contextTokensUsed` | `usageData.costInCents` |
+| claude, cursor-agent, obsidian | — | estimated | — |
+
+Sources that record no usage fall back to a character-count estimate, always
+printed with a leading `~` so it is never mistaken for a measurement. A `-`
+means the source genuinely does not record that number. Sessions from a source
+with no model name still appear, grouped under `(unknown)`, so the token totals
+always add up.
+
+### CSV export
+
+```bash
+recall stats --csv usage-      # → usage-projects.csv, usage-models.csv
+```
+
+Raw unformatted numbers (`8152978475`, not `8.2B`; no `$`, no `~`) so a
+spreadsheet can do arithmetic on them; the `~` becomes an `estimated` column you
+can filter on. All filters apply (`--repo`, `--since`, `--tag`), and row caps do
+not — an export is everything.
+
+```bash
+# cost per 1M tokens, measured rows only
+recall stats --csv u- && python3 -c "
+import csv
+for r in csv.DictReader(open('u-models.csv')):
+    if r['estimated']=='false' and float(r['cost_usd'])>0:
+        print(r['model'], round(float(r['cost_usd'])/(int(r['tokens'])/1e6), 3))"
+```
 
 ## What it reads
 
