@@ -53,10 +53,10 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
 			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
 				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
-				return be.add(Session{
-					Source: "codex", SourceID: prevSt.SID, Append: true,
-					EndedAt: p.endedAt, MsgCount: len(p.msgs),
-				}, p.msgs)
+				s := p.session(prevSt.SID)
+				s.Append = true
+				s.StartedAt, s.Project, s.Title = 0, "", ""
+				return be.add(s, p.msgs)
 			}
 		}
 
@@ -65,12 +65,7 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
 			return nil
 		}
-		return be.add(Session{
-			Source: "codex", SourceID: p.sessID,
-			Project: p.project, Title: titleFromPrompt(p.firstUser),
-			StartedAt: p.startedAt, EndedAt: p.endedAt,
-			MsgCount: len(p.msgs),
-		}, p.msgs)
+		return be.add(p.session(p.sessID), p.msgs)
 	})
 	if err != nil {
 		return err
@@ -109,6 +104,16 @@ type codexParse struct {
 	msgs               []Message
 	endOffset          int64
 	nextIdx            int
+	usage              Session // usage fields only; see (codexParse).session
+}
+
+func (p codexParse) session(sourceID string) Session {
+	s := p.usage
+	s.Source, s.SourceID = "codex", sourceID
+	s.Project, s.Title = p.project, titleFromPrompt(p.firstUser)
+	s.StartedAt, s.EndedAt = p.startedAt, p.endedAt
+	s.MsgCount = len(p.msgs)
+	return s
 }
 
 func (a *CodexAdapter) parse(ctx context.Context, path string, startOffset int64, startIdx int, knownSID string, truncate bool) (codexParse, error) {
@@ -143,11 +148,24 @@ func (a *CodexAdapter) parse(ctx context.Context, path string, startOffset int64
 			} else if ts > 0 {
 				res.startedAt = ts
 			}
+		case "turn_context":
+			if ev.Payload.Model != "" {
+				res.usage.Model = ev.Payload.Model
+			}
+		case "event_msg":
+			// token_count reports a running total for the session, so the last
+			// one wins — summing them would multiply-count every earlier turn.
+			if tu := ev.Payload.Info.TotalTokenUsage; tu.TotalTokens > 0 {
+				res.usage.TokensIn = tu.InputTokens - tu.CachedInputTokens
+				res.usage.TokensOut = tu.OutputTokens
+				res.usage.CacheRead = tu.CachedInputTokens
+			}
 		case "response_item":
 			role, text := ev.Payload.flatten()
 			if text == "" {
 				return nil
 			}
+			res.usage.Chars += int64(len(text))
 			if ts > res.endedAt {
 				res.endedAt = ts
 			}
@@ -185,6 +203,9 @@ type CodexPayload struct {
 	ID  string `json:"id"`
 	CWD string `json:"cwd"`
 
+	Model string          `json:"model"` // on type=turn_context
+	Info  CodexUsageInfo  `json:"info"`  // on type=event_msg (token_count)
+
 	ItemType  string       `json:"type"`
 	Role      string       `json:"role"`
 	Content   []CodexPart  `json:"content"`
@@ -194,6 +215,17 @@ type CodexPayload struct {
 	Summary   []CodexPart  `json:"summary"`
 
 	Timestamp string `json:"timestamp"`
+}
+
+// CodexUsageInfo carries the running token tally codex emits in token_count
+// events. Cost is absent: codex logs usage but not what it billed.
+type CodexUsageInfo struct {
+	TotalTokenUsage struct {
+		InputTokens       int64 `json:"input_tokens"`
+		CachedInputTokens int64 `json:"cached_input_tokens"`
+		OutputTokens      int64 `json:"output_tokens"`
+		TotalTokens       int64 `json:"total_tokens"`
+	} `json:"total_token_usage"`
 }
 
 type CodexPart struct {

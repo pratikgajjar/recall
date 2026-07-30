@@ -52,10 +52,10 @@ func (a *PiAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) 
 		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
 			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
 				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
-				return be.add(Session{
-					Source: "pi", SourceID: prevSt.SID, Append: true,
-					EndedAt: p.endedAt, MsgCount: len(p.msgs),
-				}, p.msgs)
+				s := p.session(prevSt.SID)
+				s.Append = true
+				s.StartedAt, s.Project, s.Title = 0, "", ""
+				return be.add(s, p.msgs)
 			}
 		}
 
@@ -64,12 +64,7 @@ func (a *PiAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) 
 		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
 			return nil
 		}
-		return be.add(Session{
-			Source: "pi", SourceID: p.sessID,
-			Project: p.project, Title: titleFromPrompt(p.firstUser),
-			StartedAt: p.startedAt, EndedAt: p.endedAt,
-			MsgCount: len(p.msgs),
-		}, p.msgs)
+		return be.add(p.session(p.sessID), p.msgs)
 	})
 	if err != nil {
 		return err
@@ -120,6 +115,18 @@ type piParse struct {
 	msgs               []Message
 	endOffset          int64
 	nextIdx            int
+	usage              Session // usage fields only; see (piParse).session
+}
+
+// session assembles the Session this parse produced, carrying the usage pi
+// records on every assistant turn — the same numbers `/usage` reports.
+func (p piParse) session(sourceID string) Session {
+	s := p.usage
+	s.Source, s.SourceID = "pi", sourceID
+	s.Project, s.Title = p.project, titleFromPrompt(p.firstUser)
+	s.StartedAt, s.EndedAt = p.startedAt, p.endedAt
+	s.MsgCount = len(p.msgs)
+	return s
 }
 
 func (a *PiAdapter) parse(ctx context.Context, path string, startOffset int64, startIdx int, knownSID string, truncate bool) (piParse, error) {
@@ -150,11 +157,26 @@ func (a *PiAdapter) parse(ctx context.Context, path string, startOffset int64, s
 				res.project = ev.CWD
 			}
 			res.startedAt = ts
+		case "model_change":
+			if ev.ModelID != "" {
+				res.usage.Model = ev.ModelID
+			}
 		case "message":
+			if u := ev.Message.Usage; u != nil {
+				if ev.Message.Model != "" {
+					res.usage.Model = ev.Message.Model
+				}
+				res.usage.TokensIn += u.Input
+				res.usage.TokensOut += u.Output
+				res.usage.CacheRead += u.CacheRead
+				res.usage.CacheWrite += u.CacheWrite
+				res.usage.CostUSD += u.Cost.Total
+			}
 			text := ev.Message.Text()
 			if text == "" {
 				return nil
 			}
+			res.usage.Chars += int64(len(text))
 			if ts > res.endedAt {
 				res.endedAt = ts
 			}
@@ -187,12 +209,27 @@ type PiEvent struct {
 	ID        string    `json:"id"`
 	CWD       string    `json:"cwd"`
 	Timestamp string    `json:"timestamp"`
+	ModelID   string    `json:"modelId"` // on type=model_change
 	Message   PiMessage `json:"message"`
 }
 
 type PiMessage struct {
 	Role    string        `json:"role"`
+	Model   string        `json:"model"`
 	Content PiMessageBody `json:"content"`
+	Usage   *PiUsage      `json:"usage"`
+}
+
+// PiUsage is the real per-assistant-message accounting pi writes to the
+// session log. Cost is already computed against the model's price sheet.
+type PiUsage struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
+	Cost       struct {
+		Total float64 `json:"total"`
+	} `json:"cost"`
 }
 
 type PiMessageBody struct {

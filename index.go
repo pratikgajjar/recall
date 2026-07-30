@@ -90,7 +90,7 @@ func openIndexRead(path string) (*Index, error) {
 // schemaVersion bumps when the on-disk schema changes in a way bootstrap can't
 // reach via CREATE IF NOT EXISTS. Each bump triggers a one-shot migration in
 // migrateSchema() (drop legacy FTS, drop dead columns, clear checkpoints).
-const schemaVersion = "3"
+const schemaVersion = "4"
 
 func bootstrap(db *sql.DB) error {
 	stmts := []string{
@@ -102,7 +102,14 @@ func bootstrap(db *sql.DB) error {
 			title       TEXT,
 			started_at  INTEGER,
 			ended_at    INTEGER,
-			msg_count   INTEGER
+			msg_count   INTEGER,
+			model       TEXT,
+			tokens_in   INTEGER,
+			tokens_out  INTEGER,
+			cache_read  INTEGER,
+			cache_write INTEGER,
+			cost_usd    REAL,
+			estimated   INTEGER
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_project_started
 			ON sessions(project, started_at DESC)`,
@@ -161,6 +168,9 @@ func bootstrap(db *sql.DB) error {
 //     next index run rebuilds FTS rows from source transcripts.
 //   - →v3: add session_tags (created by bootstrap, non-destructive). The bump
 //     just re-stamps the version; no migration step needed here.
+//   - →v4: add the usage columns (model, tokens, cost). ALTER-ADD is
+//     non-destructive, but existing rows have no usage data, so checkpoints
+//     are cleared to force one full rescan that backfills them.
 func migrateSchema(db *sql.DB) error {
 	var version string
 	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version)
@@ -187,6 +197,30 @@ func migrateSchema(db *sql.DB) error {
 		if _, err := db.Exec(`ALTER TABLE sessions DROP COLUMN meta`); err != nil {
 			return fmt.Errorf("drop sessions.meta: %w", err)
 		}
+	}
+
+	// v4 usage columns. bootstrap's CREATE IF NOT EXISTS can't reach an
+	// existing table, so add them one by one and re-scan to fill them.
+	for _, col := range []struct{ name, decl string }{
+		{"model", "TEXT"},
+		{"tokens_in", "INTEGER"},
+		{"tokens_out", "INTEGER"},
+		{"cache_read", "INTEGER"},
+		{"cache_write", "INTEGER"},
+		{"cost_usd", "REAL"},
+		{"estimated", "INTEGER"},
+	} {
+		has, err := tableHasColumn(db, "sessions", col.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN ` + col.name + ` ` + col.decl); err != nil {
+			return fmt.Errorf("add sessions.%s: %w", col.name, err)
+		}
+		dirty = true
 	}
 	if dirty {
 		// FTS was wiped — force a full reindex by clearing per-adapter checkpoints.
@@ -230,14 +264,22 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer tx.Rollback()
 
-	upsertSess, err := tx.Prepare(`INSERT INTO sessions(id, source, source_id, project, title, started_at, ended_at, msg_count)
-		VALUES(?,?,?,?,?,?,?,?)
+	upsertSess, err := tx.Prepare(`INSERT INTO sessions(id, source, source_id, project, title, started_at, ended_at, msg_count,
+			model, tokens_in, tokens_out, cache_read, cache_write, cost_usd, estimated)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			project=excluded.project,
 			title=excluded.title,
 			started_at=excluded.started_at,
 			ended_at=excluded.ended_at,
-			msg_count=excluded.msg_count`)
+			msg_count=excluded.msg_count,
+			model=excluded.model,
+			tokens_in=excluded.tokens_in,
+			tokens_out=excluded.tokens_out,
+			cache_read=excluded.cache_read,
+			cache_write=excluded.cache_write,
+			cost_usd=excluded.cost_usd,
+			estimated=excluded.estimated`)
 	if err != nil {
 		return err
 	}
@@ -268,8 +310,15 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	defer insSessFTS.Close()
 
 	updAgg, err := tx.Prepare(`UPDATE sessions
-		SET msg_count = COALESCE(msg_count,0) + ?,
-		    ended_at  = MAX(COALESCE(ended_at,0), ?)
+		SET msg_count   = COALESCE(msg_count,0) + ?,
+		    ended_at    = MAX(COALESCE(ended_at,0), ?),
+		    model       = COALESCE(NULLIF(?,''), model),
+		    tokens_in   = COALESCE(tokens_in,0)   + ?,
+		    tokens_out  = COALESCE(tokens_out,0)  + ?,
+		    cache_read  = COALESCE(cache_read,0)  + ?,
+		    cache_write = COALESCE(cache_write,0) + ?,
+		    cost_usd    = COALESCE(cost_usd,0.0)  + ?,
+		    estimated   = ?
 		WHERE id = ?`)
 	if err != nil {
 		return err
@@ -304,13 +353,18 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 				}
 				added++
 			}
-			if _, err := updAgg.Exec(added, s.EndedAt, pk); err != nil {
+			u := withEstimate(s)
+			if _, err := updAgg.Exec(added, s.EndedAt, u.Model,
+				u.TokensIn, u.TokensOut, u.CacheRead, u.CacheWrite, u.CostUSD, u.Estimated,
+				pk); err != nil {
 				return fmt.Errorf("append agg %s: %w", pk, err)
 			}
 			continue
 		}
+		u := withEstimate(s)
 		if _, err := upsertSess.Exec(pk, source, s.SourceID, s.Project, s.Title,
-			s.StartedAt, s.EndedAt, s.MsgCount); err != nil {
+			s.StartedAt, s.EndedAt, s.MsgCount,
+			u.Model, u.TokensIn, u.TokensOut, u.CacheRead, u.CacheWrite, u.CostUSD, u.Estimated); err != nil {
 			return fmt.Errorf("upsert session %s: %w", pk, err)
 		}
 		if _, err := delFTS.Exec(pk); err != nil {
@@ -338,6 +392,28 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 		}
 	}
 	return tx.Commit()
+}
+
+// charsPerToken is the fallback ratio for sources that report no usage.
+// Calibrated against Cursor's contextTokensUsed over 40 real sessions
+// (median 2.7 chars/token) and the common BPE rule of thumb (~4 for prose,
+// ~2.5 for code); agent transcripts are code-heavy, so 3 splits the
+// difference. Only ever a ballpark — rows derived this way carry
+// Estimated=true so callers can mark them.
+//
+// ponytail: one global ratio, not per-model tokenizers. Swap in tiktoken
+// only if someone needs billing-grade numbers from an unreported source.
+const charsPerToken = 3
+
+// withEstimate fills in a token estimate for sources that report no usage.
+// A source that reported anything real is returned untouched.
+func withEstimate(s Session) Session {
+	if s.TokensIn+s.TokensOut+s.CacheRead+s.CacheWrite > 0 || s.Chars <= 0 {
+		return s
+	}
+	s.TokensIn = s.Chars / charsPerToken
+	s.Estimated = true
+	return s
 }
 
 func trimText(s string) string {
@@ -660,6 +736,24 @@ type StatRow struct {
 	Project  string `json:"project,omitempty"`
 	Sessions int    `json:"sessions"`
 	Messages int    `json:"messages"`
+
+	Tokens    int64   `json:"tokens"`
+	CacheRead int64   `json:"cache_read"`
+	CostUSD   float64 `json:"cost_usd"`
+	// Estimated is true when no session in the group reported real usage.
+	Estimated bool `json:"estimated,omitempty"`
+}
+
+// ModelRow is usage rolled up by model rather than by project — the "what did
+// I actually spend it on" view.
+type ModelRow struct {
+	Model     string  `json:"model"`
+	Source    string  `json:"source"`
+	Sessions  int     `json:"sessions"`
+	Tokens    int64   `json:"tokens"`
+	CacheRead int64   `json:"cache_read"`
+	CostUSD   float64 `json:"cost_usd"`
+	Estimated bool    `json:"estimated,omitempty"`
 }
 
 func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
@@ -681,7 +775,11 @@ func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 		where = append(where, "started_at < ?")
 		args = append(args, opts.Before)
 	}
-	q := `SELECT source, COALESCE(project,''), COUNT(*), COALESCE(SUM(msg_count),0)
+	q := `SELECT source, COALESCE(project,''), COUNT(*), COALESCE(SUM(msg_count),0),
+	             COALESCE(SUM(tokens_in + tokens_out + cache_read + cache_write),0),
+	             COALESCE(SUM(cache_read),0),
+	             COALESCE(SUM(cost_usd),0),
+	             MIN(COALESCE(estimated,1))
 	        FROM sessions WHERE ` + strings.Join(where, " AND ") + `
 	    GROUP BY source, project ORDER BY 4 DESC, 3 DESC`
 	rows, err := ix.db.Query(q, args...)
@@ -692,9 +790,59 @@ func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 	var out []StatRow
 	for rows.Next() {
 		var r StatRow
-		if err := rows.Scan(&r.Source, &r.Project, &r.Sessions, &r.Messages); err != nil {
+		var est int
+		if err := rows.Scan(&r.Source, &r.Project, &r.Sessions, &r.Messages,
+			&r.Tokens, &r.CacheRead, &r.CostUSD, &est); err != nil {
 			return nil, err
 		}
+		r.Estimated = est == 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ModelStats rolls usage up by model. Sessions with no recorded model are
+// skipped: an "(unknown)" bucket spanning every pre-v4 row is just noise.
+func (ix *Index) ModelStats(opts SearchOpts) ([]ModelRow, error) {
+	where := []string{"model IS NOT NULL", "model != ''"}
+	var args []any
+	if opts.Source != "" {
+		where = append(where, "source = ?")
+		args = append(args, opts.Source)
+	}
+	if opts.Project != "" {
+		where = append(where, "(project = ? OR project LIKE ? || '/%')")
+		args = append(args, opts.Project, opts.Project)
+	}
+	if opts.After > 0 {
+		where = append(where, "started_at >= ?")
+		args = append(args, opts.After)
+	}
+	if opts.Before > 0 {
+		where = append(where, "started_at < ?")
+		args = append(args, opts.Before)
+	}
+	q := `SELECT model, source, COUNT(*),
+	             COALESCE(SUM(tokens_in + tokens_out + cache_read + cache_write),0),
+	             COALESCE(SUM(cache_read),0),
+	             COALESCE(SUM(cost_usd),0),
+	             MIN(COALESCE(estimated,1))
+	        FROM sessions WHERE ` + strings.Join(where, " AND ") + `
+	    GROUP BY model, source ORDER BY 6 DESC, 4 DESC`
+	rows, err := ix.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ModelRow
+	for rows.Next() {
+		var r ModelRow
+		var est int
+		if err := rows.Scan(&r.Model, &r.Source, &r.Sessions,
+			&r.Tokens, &r.CacheRead, &r.CostUSD, &est); err != nil {
+			return nil, err
+		}
+		r.Estimated = est == 1
 		out = append(out, r)
 	}
 	return out, rows.Err()

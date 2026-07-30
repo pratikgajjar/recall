@@ -139,6 +139,26 @@ type cursorComposerBlob struct {
 	CreatedAt                   int64                  `json:"createdAt"`
 	Name                        string                 `json:"name"`
 	FullConversationHeadersOnly []cursorComposerHeader `json:"fullConversationHeadersOnly"`
+
+	// Cursor records a context-window snapshot rather than a per-turn tally,
+	// plus spend per model. usageData is keyed by model name.
+	ModelConfig struct {
+		ModelName string `json:"modelName"`
+	} `json:"modelConfig"`
+	ContextTokensUsed int64 `json:"contextTokensUsed"`
+	UsageData         map[string]struct {
+		CostInCents float64 `json:"costInCents"`
+	} `json:"usageData"`
+}
+
+// costUSD totals what Cursor recorded spending across every model in the
+// composer.
+func (c cursorComposerBlob) costUSD() float64 {
+	var cents float64
+	for _, u := range c.UsageData {
+		cents += u.CostInCents
+	}
+	return cents / 100
 }
 
 func (a *CursorAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) error {
@@ -299,11 +319,13 @@ func (a *CursorAdapter) readComposers(ctx context.Context, db *sql.DB, cids []st
 			continue
 		}
 		var firstUser string
+		var chars int64
 		for idx, b := range ordered {
 			role := bubbleRole(b.ttype)
 			if role == "user" && firstUser == "" && !looksLikeWrapper(b.text) {
 				firstUser = b.text
 			}
+			chars += int64(len(b.text))
 			msgs = append(msgs, Message{SourceID: cid, Idx: idx, Role: role, TS: 0, Text: b.text})
 		}
 		title := c.Name
@@ -313,6 +335,8 @@ func (a *CursorAdapter) readComposers(ctx context.Context, db *sql.DB, cids []st
 		sessions = append(sessions, Session{
 			Source: "cursor", SourceID: cid, Project: cidToProject[cid],
 			Title: title, StartedAt: c.CreatedAt, EndedAt: c.CreatedAt, MsgCount: len(ordered),
+			Model: c.ModelConfig.ModelName, TokensIn: c.ContextTokensUsed,
+			CostUSD: c.costUSD(), Chars: chars,
 		})
 	}
 	return sessions, msgs, nil

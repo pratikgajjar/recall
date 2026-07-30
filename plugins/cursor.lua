@@ -105,9 +105,21 @@ return {
       msgs[i] = { idx = i - 1, role = e.role, ts = 0, text = e.text }
     end
 
+    -- Cursor reports a context-window snapshot (contextTokensUsed) rather
+    -- than a per-turn tally, plus spend per model in usageData.
+    local cost = 0
+    if type(cb.usageData) == "table" then
+      for _, v in pairs(cb.usageData) do
+        if type(v) == "table" then cost = cost + (v.costInCents or 0) end
+      end
+    end
+
     return
       { id = id, title = cb.name or "",
-        started_at = cb.createdAt or 0, ended_at = cb.createdAt or 0 },
+        started_at = cb.createdAt or 0, ended_at = cb.createdAt or 0,
+        model = (cb.modelConfig or {}).modelName,
+        tokens_in = cb.contextTokensUsed or 0,
+        cost_usd = cost / 100 },
       msgs
   end,
 }

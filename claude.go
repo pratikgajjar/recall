@@ -67,7 +67,7 @@ func (a *ClaudeAdapter) ScanStream(ctx context.Context, prev string, emit EmitFu
 					nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
 					if err := be.add(Session{
 						Source: "claude", SourceID: sessID, Append: true,
-						EndedAt: p.endedAt, MsgCount: len(p.msgs),
+						EndedAt: p.endedAt, MsgCount: len(p.msgs), Chars: p.chars,
 					}, p.msgs); err != nil {
 						return err
 					}
@@ -89,7 +89,7 @@ func (a *ClaudeAdapter) ScanStream(ctx context.Context, prev string, emit EmitFu
 				Source: "claude", SourceID: sessID,
 				Project: proj, Title: titleFromPrompt(p.firstUser),
 				StartedAt: p.startedAt, EndedAt: p.endedAt,
-				MsgCount: len(p.msgs),
+				MsgCount: len(p.msgs), Chars: p.chars,
 			}, p.msgs); err != nil {
 				return err
 			}
@@ -127,6 +127,10 @@ type claudeParse struct {
 	firstUser, cwd     string
 	endOffset          int64
 	nextIdx            int
+	// chars is pre-truncation text size. Claude Code logs a usage block but
+	// fills it with zeros on <synthetic> messages, so there is nothing real to
+	// read — ingest estimates from this instead.
+	chars int64
 }
 
 func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int64, startIdx int, sessID string, truncate bool) (claudeParse, error) {
@@ -169,6 +173,7 @@ func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int6
 		if ev.Type == "user" && res.firstUser == "" && !looksLikeWrapper(text) {
 			res.firstUser = text
 		}
+		res.chars += int64(len(text))
 		if truncate && len(text) > excerptMax {
 			text = text[:excerptMax]
 		}

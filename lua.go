@@ -229,10 +229,10 @@ func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string,
 		p, err := a.callLine(L, mod, path, prevSt.Offset, prevSt.Idx, prevSt.SID, mtime/1e6, true)
 		if err == nil && len(p.msgs) > 0 {
 			nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
-			return be.add(Session{
-				Source: a.man.id, SourceID: prevSt.SID, Append: true,
-				EndedAt: p.endedAt, MsgCount: len(p.msgs),
-			}, p.msgs)
+			s := p.session(a.man.id, prevSt.SID)
+			s.Append = true
+			s.StartedAt, s.Project, s.Title = 0, "", ""
+			return be.add(s, p.msgs)
 		}
 	}
 
@@ -241,16 +241,22 @@ func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string,
 	if err != nil || p.sessID == "" || len(p.msgs) == 0 {
 		return nil
 	}
+	return be.add(p.session(a.man.id, p.sessID), p.msgs)
+}
+
+// session assembles the Session a line-kind parse produced, carrying over the
+// usage the plugin reported (or the char count that lets ingest estimate it).
+func (p luaLineParse) session(source, sourceID string) Session {
 	title := p.title
 	if title == "" {
 		title = titleFromPrompt(p.firstUser)
 	}
-	return be.add(Session{
-		Source: a.man.id, SourceID: p.sessID,
-		Project: p.project, Title: title,
-		StartedAt: p.startedAt, EndedAt: p.endedAt,
-		MsgCount: len(p.msgs),
-	}, p.msgs)
+	s := p.usage // Model/Tokens/Cache/Cost/Chars
+	s.Source, s.SourceID = source, sourceID
+	s.Project, s.Title = p.project, title
+	s.StartedAt, s.EndedAt = p.startedAt, p.endedAt
+	s.MsgCount = len(p.msgs)
+	return s
 }
 
 func (a *luaAdapter) Fetch(ctx context.Context, sourceID string) (msgs []Message, err error) {
@@ -311,6 +317,7 @@ type luaLineParse struct {
 	msgs                   []Message
 	endOffset              int64
 	nextIdx                int
+	usage                  Session // only the usage fields are read off this
 }
 
 // callFile invokes the plugin's file(doc) -> session, messages.
@@ -346,8 +353,23 @@ func (a *luaAdapter) callFile(L *lua.LState, mod *lua.LTable, path string, data 
 		StartedAt: lvInt(st.RawGetString("started_at")),
 		EndedAt:   lvInt(st.RawGetString("ended_at")),
 	}
-	msgs := a.tableToMessages(mv, sess.SourceID, truncate)
+	readUsage(st, &sess)
+	msgs := a.tableToMessages(mv, sess.SourceID, truncate, &sess.Chars)
 	return deriveSessionMeta(sess, msgs), msgs, nil
+}
+
+// readUsage pulls the optional usage fields a plugin may set on its session
+// table. All are optional: a plugin that knows nothing about tokens simply
+// leaves them unset and ingest falls back to the chars/4-style estimate.
+func readUsage(t *lua.LTable, sess *Session) {
+	sess.Model = lvStr(t.RawGetString("model"))
+	sess.TokensIn = lvInt(t.RawGetString("tokens_in"))
+	sess.TokensOut = lvInt(t.RawGetString("tokens_out"))
+	sess.CacheRead = lvInt(t.RawGetString("cache_read"))
+	sess.CacheWrite = lvInt(t.RawGetString("cache_write"))
+	if v, ok := t.RawGetString("cost_usd").(lua.LNumber); ok {
+		sess.CostUSD = float64(v)
+	}
 }
 
 // deriveSessionMeta fills the fields a plugin can omit: when Title or StartedAt
@@ -433,6 +455,7 @@ func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, start
 		if role == "user" && res.firstUser == "" && !looksLikeWrapper(text) {
 			res.firstUser = text
 		}
+		res.usage.Chars += int64(len(text))
 		if truncate && len(text) > excerptMax {
 			text = text[:excerptMax]
 		}
@@ -453,13 +476,16 @@ func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, start
 	if t := lvInt(state.RawGetString("ended_at")); t > res.endedAt {
 		res.endedAt = t
 	}
+	chars := res.usage.Chars
+	readUsage(state, &res.usage)
+	res.usage.Chars = chars
 	for i := range res.msgs {
 		res.msgs[i].SourceID = res.sessID
 	}
 	return res, err
 }
 
-func (a *luaAdapter) tableToMessages(v lua.LValue, sid string, truncate bool) []Message {
+func (a *luaAdapter) tableToMessages(v lua.LValue, sid string, truncate bool, chars *int64) []Message {
 	t, ok := v.(*lua.LTable)
 	if !ok {
 		return nil
@@ -474,6 +500,9 @@ func (a *luaAdapter) tableToMessages(v lua.LValue, sid string, truncate bool) []
 		text := lvStr(mt.RawGetString("text"))
 		if text == "" {
 			continue
+		}
+		if chars != nil {
+			*chars += int64(len(text))
 		}
 		if truncate && len(text) > excerptMax {
 			text = text[:excerptMax]
@@ -1013,14 +1042,7 @@ func (a *luaAdapter) testSample(sample string) ([]Session, []Message, error) {
 		}
 		var sessions []Session
 		if p.sessID != "" {
-			title := p.title
-			if title == "" {
-				title = titleFromPrompt(p.firstUser)
-			}
-			sessions = []Session{{
-				Source: a.man.id, SourceID: p.sessID, Project: p.project,
-				Title: title, StartedAt: p.startedAt, EndedAt: p.endedAt, MsgCount: len(p.msgs),
-			}}
+			sessions = []Session{p.session(a.man.id, p.sessID)}
 		}
 		return sessions, p.msgs, nil
 	default: // "file"
@@ -1387,7 +1409,8 @@ func (a *luaAdapter) callSession(L *lua.LState, mod *lua.LTable, id, headerVal s
 		StartedAt: lvInt(sessT.RawGetString("started_at")),
 		EndedAt:   lvInt(sessT.RawGetString("ended_at")),
 	}
-	msgs := a.tableToMessages(mv, sess.SourceID, truncate)
+	readUsage(sessT, &sess)
+	msgs := a.tableToMessages(mv, sess.SourceID, truncate, &sess.Chars)
 	return deriveSessionMeta(sess, msgs), msgs, nil
 }
 

@@ -42,7 +42,27 @@ return {
       st.started_at = recall.time(recall.get(line, "timestamp"), "rfc3339")
       return nil
     end
+    if t == "model_change" then
+      -- Last model wins: what the session ended up running on.
+      st.model = recall.get(line, "modelId") or st.model
+      return nil
+    end
     if t ~= "message" then return nil end
+
+    -- pi records real per-message usage on every assistant turn. Sum it:
+    -- that is exactly what `/usage` reports inside the agent.
+    local u = recall.get(line, "message.usage")
+    if type(u) == "table" then
+      st.model = recall.get(line, "message.model") or st.model
+      st.tokens_in = (st.tokens_in or 0) + (u.input or 0)
+      st.tokens_out = (st.tokens_out or 0) + (u.output or 0)
+      st.cache_read = (st.cache_read or 0) + (u.cacheRead or 0)
+      st.cache_write = (st.cache_write or 0) + (u.cacheWrite or 0)
+      if type(u.cost) == "table" then
+        st.cost_usd = (st.cost_usd or 0) + (u.cost.total or 0)
+      end
+    end
+
     local text = flatten(recall.get(line, "message.content"))
     if text == "" then return nil end
     return {

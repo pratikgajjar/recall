@@ -26,6 +26,22 @@ return {
       st.started_at = recall.time(recall.get(line, "payload.timestamp"), "rfc3339")
       return nil
     end
+    if t == "turn_context" then
+      st.model = recall.get(line, "payload.model") or st.model
+      return nil
+    end
+    if t == "event_msg" then
+      -- token_count carries a running total for the whole session, so the
+      -- last one wins rather than summing (summing would multiply-count).
+      local tu = recall.get(line, "payload.info.total_token_usage")
+      if type(tu) == "table" and (tu.total_tokens or 0) > 0 then
+        local cached = tu.cached_input_tokens or 0
+        st.tokens_in = (tu.input_tokens or 0) - cached
+        st.tokens_out = tu.output_tokens or 0
+        st.cache_read = cached
+      end
+      return nil
+    end
     if t ~= "response_item" then return nil end
 
     local it = recall.get(line, "payload.type")

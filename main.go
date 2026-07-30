@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 )
 
@@ -154,7 +155,16 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
+// defaultIndexPath is ~/.recall/index.sqlite, overridable with RECALL_INDEX.
+//
+// The override exists so schema changes can be tried against a scratch index
+// without migrating the real one out from under other running recall builds:
+//
+//	RECALL_INDEX=/tmp/scratch.sqlite ./recall index --full
 func defaultIndexPath() string {
+	if p := os.Getenv("RECALL_INDEX"); p != "" {
+		return p
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".recall", "index.sqlite")
 }
@@ -996,6 +1006,7 @@ func runStats(args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	var cf commonFlags
 	cf.register(fs)
+	topN := fs.Int("projects", 8, "projects to list per source (0 = all)")
 	flagArgs, _ := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -1013,11 +1024,20 @@ func runStats(args []string) error {
 	if err != nil {
 		return err
 	}
+	models, err := ix.ModelStats(opts)
+	if err != nil {
+		return err
+	}
 	if cf.json {
-		return JSONNewEncoder(os.Stdout).Encode(rows)
+		return JSONNewEncoder(os.Stdout).Encode(struct {
+			Projects []StatRow  `json:"projects"`
+			Models   []ModelRow `json:"models"`
+		}{rows, models})
 	}
 
 	var totalS, totalM int
+	var totalTok int64
+	var totalCost float64
 	bySource := map[string][]StatRow{}
 	order := []string{}
 	for _, r := range rows {
@@ -1027,26 +1047,103 @@ func runStats(args []string) error {
 		bySource[r.Source] = append(bySource[r.Source], r)
 		totalS += r.Sessions
 		totalM += r.Messages
+		totalTok += r.Tokens
+		totalCost += r.CostUSD
 	}
-	fmt.Fprintln(os.Stdout, "source  sessions   messages   project")
-	fmt.Fprintln(os.Stdout, "------  --------   --------   -------")
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "SOURCE\tSESSIONS\tMESSAGES\tTOKENS\tCOST\tPROJECT")
 	for _, src := range order {
+		group := bySource[src]
 		var ss, ms int
-		for _, r := range bySource[src] {
+		var tok int64
+		var cost float64
+		allEst := true
+		for _, r := range group {
 			ss += r.Sessions
 			ms += r.Messages
+			tok += r.Tokens
+			cost += r.CostUSD
+			if !r.Estimated {
+				allEst = false
+			}
 		}
-		fmt.Fprintf(os.Stdout, "%-6s  %8d   %8d   (all)\n", src, ss, ms)
-		for _, r := range bySource[src] {
+		fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\t(all)\n",
+			src, ss, ms, fmtTokens(tok, allEst), fmtCost(cost))
+
+		shown := group
+		if *topN > 0 && len(shown) > *topN {
+			shown = shown[:*topN]
+		}
+		for _, r := range shown {
 			proj := r.Project
 			if proj == "" {
 				proj = "(none)"
 			}
-			fmt.Fprintf(os.Stdout, "        %8d   %8d     %s\n", r.Sessions, r.Messages, shortProject(proj))
+			fmt.Fprintf(w, "\t%d\t%d\t%s\t%s\t  %s\n",
+				r.Sessions, r.Messages, fmtTokens(r.Tokens, r.Estimated),
+				fmtCost(r.CostUSD), shortProject(proj))
+		}
+		if n := len(group) - len(shown); n > 0 {
+			fmt.Fprintf(w, "\t\t\t\t\t  … %d more (--projects 0)\n", n)
 		}
 	}
-	fmt.Fprintf(os.Stdout, "\n%-6s  %8d   %8d\n", "total", totalS, totalM)
+	fmt.Fprintf(w, "\nTOTAL\t%d\t%d\t%s\t%s\t\n",
+		totalS, totalM, fmtTokens(totalTok, false), fmtCost(totalCost))
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	if len(models) > 0 {
+		mw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(mw, "\nMODEL\tSOURCE\tSESSIONS\tTOKENS\tCACHED\tCOST")
+		for _, m := range models {
+			cached := ""
+			if m.Tokens > 0 && m.CacheRead > 0 {
+				cached = fmt.Sprintf("%d%%", 100*m.CacheRead/m.Tokens)
+			}
+			fmt.Fprintf(mw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+				m.Model, m.Source, m.Sessions,
+				fmtTokens(m.Tokens, m.Estimated), cached, fmtCost(m.CostUSD))
+		}
+		if err := mw.Flush(); err != nil {
+			return err
+		}
+	}
+	if totalCost == 0 {
+		fmt.Fprintln(os.Stdout, "\n~ = estimated from text length; cost is only known where the source records it.")
+	}
 	return nil
+}
+
+// fmtTokens renders a token count compactly (1.2M, 340k). est prefixes a ~.
+func fmtTokens(n int64, est bool) string {
+	if n == 0 {
+		return "-"
+	}
+	mark := ""
+	if est {
+		mark = "~"
+	}
+	switch {
+	case n >= 1e9:
+		return fmt.Sprintf("%s%.1fB", mark, float64(n)/1e9)
+	case n >= 1e6:
+		return fmt.Sprintf("%s%.1fM", mark, float64(n)/1e6)
+	case n >= 1e3:
+		return fmt.Sprintf("%s%.0fk", mark, float64(n)/1e3)
+	}
+	return fmt.Sprintf("%s%d", mark, n)
+}
+
+func fmtCost(usd float64) string {
+	if usd == 0 {
+		return "-"
+	}
+	if usd < 1 {
+		return fmt.Sprintf("%.0f\u00a2", usd*100)
+	}
+	return fmt.Sprintf("$%.2f", usd)
 }
 
 func runRelated(args []string) error {

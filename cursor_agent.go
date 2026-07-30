@@ -81,7 +81,7 @@ func (a *CursorAgentAdapter) ScanStream(ctx context.Context, prev string, emit E
 				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
 				return be.add(Session{
 					Source: "cursor-agent", SourceID: prevSt.SID, Append: true,
-					EndedAt: mtimeMs, MsgCount: len(p.msgs),
+					EndedAt: mtimeMs, MsgCount: len(p.msgs), Chars: p.chars,
 				}, p.msgs)
 			}
 		}
@@ -95,7 +95,7 @@ func (a *CursorAgentAdapter) ScanStream(ctx context.Context, prev string, emit E
 		return be.add(Session{
 			Source: "cursor-agent", SourceID: sid,
 			Project: cursorAgentSlug(path), Title: titleFromPrompt(p.firstUser),
-			StartedAt: mtimeMs, EndedAt: mtimeMs, MsgCount: len(p.msgs),
+			StartedAt: mtimeMs, EndedAt: mtimeMs, MsgCount: len(p.msgs), Chars: p.chars,
 		}, p.msgs)
 	})
 	if err != nil {
@@ -134,6 +134,9 @@ type cursorAgentParse struct {
 	msgs      []Message
 	endOffset int64
 	nextIdx   int
+	// chars is pre-truncation text size; this source records no usage, so
+	// ingest estimates tokens from it.
+	chars int64
 }
 
 func (a *CursorAgentAdapter) parse(ctx context.Context, path string, startOffset int64, startIdx int, knownSID string, truncate bool) (cursorAgentParse, error) {
@@ -164,6 +167,7 @@ func (a *CursorAgentAdapter) parse(ctx context.Context, path string, startOffset
 		if rec.Role == "user" && res.firstUser == "" && !looksLikeWrapper(text) {
 			res.firstUser = text
 		}
+		res.chars += int64(len(text))
 		if truncate && len(text) > excerptMax {
 			text = text[:excerptMax]
 		}
