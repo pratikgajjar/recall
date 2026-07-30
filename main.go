@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
@@ -1007,6 +1008,8 @@ func runStats(args []string) error {
 	var cf commonFlags
 	cf.register(fs)
 	topN := fs.Int("projects", 8, "projects to list per source (0 = all)")
+	topM := fs.Int("models", 12, "models to list (0 = all)")
+	csvPrefix := fs.String("csv", "", "export to <prefix>projects.csv and <prefix>models.csv\n\tinstead of printing tables (raw unformatted numbers)")
 	flagArgs, _ := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -1033,6 +1036,9 @@ func runStats(args []string) error {
 			Projects []StatRow  `json:"projects"`
 			Models   []ModelRow `json:"models"`
 		}{rows, models})
+	}
+	if *csvPrefix != "" {
+		return exportStatsCSV(*csvPrefix, rows, models)
 	}
 
 	var totalS, totalM int
@@ -1095,16 +1101,25 @@ func runStats(args []string) error {
 	}
 
 	if len(models) > 0 {
+		shown := models
+		if *topM > 0 && len(shown) > *topM {
+			shown = shown[:*topM]
+		}
 		mw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(mw, "\nMODEL\tSOURCE\tSESSIONS\tTOKENS\tCACHED\tCOST")
-		for _, m := range models {
+		for _, m := range shown {
 			cached := ""
 			if m.Tokens > 0 && m.CacheRead > 0 {
 				cached = fmt.Sprintf("%d%%", 100*m.CacheRead/m.Tokens)
 			}
+			// Cursor names a best-of-N composer after every model it ran, which
+			// is one 60-char cell that pads the column for every other row.
 			fmt.Fprintf(mw, "%s\t%s\t%d\t%s\t%s\t%s\n",
-				m.Model, m.Source, m.Sessions,
+				truncate(m.Model, 28), m.Source, m.Sessions,
 				fmtTokens(m.Tokens, m.Estimated), cached, fmtCost(m.CostUSD))
+		}
+		if n := len(models) - len(shown); n > 0 {
+			fmt.Fprintf(mw, "… %d more\t\t\t\t\t\n", n)
 		}
 		if err := mw.Flush(); err != nil {
 			return err
@@ -1114,6 +1129,62 @@ func runStats(args []string) error {
 		fmt.Fprintln(os.Stdout, "\n~ = estimated from text length; cost is only known where the source records it.")
 	}
 	return nil
+}
+
+// exportStatsCSV writes the two stats tables as CSV: <prefix>projects.csv and
+// <prefix>models.csv. Numbers go out raw — no 8.2B, no $, no ~ — because the
+// point of exporting is to do arithmetic on them elsewhere. The `estimated`
+// column carries what the ~ meant, so a spreadsheet can filter guesses out.
+// Row caps (--projects/--models) are deliberately ignored here; an export is
+// everything.
+func exportStatsCSV(prefix string, rows []StatRow, models []ModelRow) error {
+	projRecords := [][]string{{"source", "project", "sessions", "messages",
+		"tokens", "cache_read", "cost_usd", "estimated"}}
+	for _, r := range rows {
+		projRecords = append(projRecords, []string{
+			r.Source, r.Project,
+			strconv.Itoa(r.Sessions), strconv.Itoa(r.Messages),
+			strconv.FormatInt(r.Tokens, 10), strconv.FormatInt(r.CacheRead, 10),
+			strconv.FormatFloat(r.CostUSD, 'f', -1, 64),
+			strconv.FormatBool(r.Estimated),
+		})
+	}
+	modelRecords := [][]string{{"model", "source", "sessions",
+		"tokens", "cache_read", "cost_usd", "estimated"}}
+	for _, m := range models {
+		modelRecords = append(modelRecords, []string{
+			m.Model, m.Source, strconv.Itoa(m.Sessions),
+			strconv.FormatInt(m.Tokens, 10), strconv.FormatInt(m.CacheRead, 10),
+			strconv.FormatFloat(m.CostUSD, 'f', -1, 64),
+			strconv.FormatBool(m.Estimated),
+		})
+	}
+	for _, out := range []struct {
+		path    string
+		records [][]string
+	}{
+		{prefix + "projects.csv", projRecords},
+		{prefix + "models.csv", modelRecords},
+	} {
+		if err := writeCSV(out.path, out.records); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "%s\t%d rows\n", out.path, len(out.records)-1)
+	}
+	return nil
+}
+
+func writeCSV(path string, records [][]string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	if err := w.WriteAll(records); err != nil { // WriteAll flushes
+		return err
+	}
+	return f.Close()
 }
 
 // fmtTokens renders a token count compactly (1.2M, 340k). est prefixes a ~.

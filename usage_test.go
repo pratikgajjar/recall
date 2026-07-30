@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -262,5 +263,37 @@ func TestCodexReasoningSummaryStillArray(t *testing.T) {
 	}
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "weighing options") {
 		t.Fatalf("reasoning summary lost: %+v", msgs)
+	}
+}
+
+// CSV export must carry raw numbers (no 8.2B / $ / ~) so a spreadsheet can do
+// arithmetic, and must keep the estimated flag as data.
+func TestExportStatsCSV(t *testing.T) {
+	dir := t.TempDir() + "/out-"
+	err := exportStatsCSV(dir,
+		[]StatRow{{Source: "pi", Project: "/work/a", Sessions: 2, Messages: 9,
+			Tokens: 8200000000, CacheRead: 7900000000, CostUSD: 6687.34}},
+		[]ModelRow{{Model: "opus", Source: "pi", Sessions: 2,
+			Tokens: 1234, CostUSD: 0.5, Estimated: true}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ file, want string }{
+		{"projects.csv", "pi,/work/a,2,9,8200000000,7900000000,6687.34,false"},
+		{"models.csv", "opus,pi,2,1234,0,0.5,true"},
+	} {
+		b, err := os.ReadFile(dir + tc.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(b)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("%s missing %q, got:\n%s", tc.file, tc.want, got)
+		}
+		// A comma-joined cursor model name must stay one field.
+		if strings.Contains(got, "8.2B") || strings.Contains(got, "$") {
+			t.Errorf("%s has formatted numbers: %s", tc.file, got)
+		}
 	}
 }
