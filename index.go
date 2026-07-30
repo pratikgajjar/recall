@@ -801,10 +801,12 @@ func (ix *Index) Stats(opts SearchOpts) ([]StatRow, error) {
 	return out, rows.Err()
 }
 
-// ModelStats rolls usage up by model. Sessions with no recorded model are
-// skipped: an "(unknown)" bucket spanning every pre-v4 row is just noise.
+// ModelStats rolls usage up by model. Sessions whose source never records a
+// model still land here under "(unknown)" — dropping them hid real usage
+// (every codex session, ~771M tokens) from a table that is supposed to
+// account for all of it.
 func (ix *Index) ModelStats(opts SearchOpts) ([]ModelRow, error) {
-	where := []string{"model IS NOT NULL", "model != ''"}
+	where := []string{"1=1"}
 	var args []any
 	if opts.Source != "" {
 		where = append(where, "source = ?")
@@ -822,13 +824,13 @@ func (ix *Index) ModelStats(opts SearchOpts) ([]ModelRow, error) {
 		where = append(where, "started_at < ?")
 		args = append(args, opts.Before)
 	}
-	q := `SELECT model, source, COUNT(*),
+	q := `SELECT COALESCE(NULLIF(model,''),'(unknown)') AS m, source, COUNT(*),
 	             COALESCE(SUM(tokens_in + tokens_out + cache_read + cache_write),0),
 	             COALESCE(SUM(cache_read),0),
 	             COALESCE(SUM(cost_usd),0),
 	             MIN(COALESCE(estimated,1))
 	        FROM sessions WHERE ` + strings.Join(where, " AND ") + `
-	    GROUP BY model, source ORDER BY 6 DESC, 4 DESC`
+	    GROUP BY m, source ORDER BY 6 DESC, 4 DESC`
 	rows, err := ix.db.Query(q, args...)
 	if err != nil {
 		return nil, err

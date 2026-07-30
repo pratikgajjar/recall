@@ -198,11 +198,13 @@ func TestUsagePersistedAndAggregated(t *testing.T) {
 	}
 }
 
-// A session with no model must not create an "(unknown)" bucket.
-func TestModelStatsSkipsUnknown(t *testing.T) {
+// Usage from a source that records no model must still be accounted for,
+// under "(unknown)" — silently dropping it hid every codex session.
+func TestModelStatsKeepsUnknown(t *testing.T) {
 	ix := newTestIndex(t)
 	if err := ix.IngestBatch(context.Background(), "claude",
-		[]Session{{Source: "claude", SourceID: "x", Title: "no model", MsgCount: 1}},
+		[]Session{{Source: "claude", SourceID: "x", Title: "no model",
+			MsgCount: 1, Chars: 300}},
 		[]Message{{SourceID: "x", Idx: 0, Role: "user", Text: strings.Repeat("a", 300)}},
 	); err != nil {
 		t.Fatal(err)
@@ -211,7 +213,54 @@ func TestModelStatsSkipsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 0 {
-		t.Errorf("want no model rows, got %+v", models)
+	if len(models) != 1 {
+		t.Fatalf("want 1 model row, got %+v", models)
+	}
+	if models[0].Model != "(unknown)" {
+		t.Errorf("model = %q, want (unknown)", models[0].Model)
+	}
+	if want := int64(300 / charsPerToken); models[0].Tokens != want {
+		t.Errorf("tokens = %d, want %d (estimate must survive)", models[0].Tokens, want)
+	}
+	if !models[0].Estimated {
+		t.Error("want Estimated=true")
+	}
+}
+
+// turn_context.summary is a bare string while response_item.summary is an
+// array; strict decoding dropped the whole line and with it the model name.
+func TestCodexTurnContextSummaryIsString(t *testing.T) {
+	root := t.TempDir()
+	writeLines(t, codexPath(root, "sess-summary"),
+		codexMeta("sess-summary", "/work/api", "2026-05-03T09:00:00Z"),
+		`{"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"high","summary":"auto"}}`,
+		codexMsg("user", "ship it", "2026-05-03T09:00:01Z"),
+	)
+	sessions, _, _, err := (&CodexAdapter{Root: root}).Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("want 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Model != "gpt-5.6-sol" {
+		t.Errorf("model = %q, want gpt-5.6-sol", sessions[0].Model)
+	}
+}
+
+// The array form must still decode into reasoning text.
+func TestCodexReasoningSummaryStillArray(t *testing.T) {
+	root := t.TempDir()
+	writeLines(t, codexPath(root, "sess-reason"),
+		codexMeta("sess-reason", "/work/api", "2026-05-03T09:00:00Z"),
+		`{"type":"response_item","timestamp":"2026-05-03T09:00:02Z","payload":`+
+			`{"type":"reasoning","summary":[{"type":"summary_text","text":"weighing options"}]}}`,
+	)
+	_, msgs, _, err := (&CodexAdapter{Root: root}).Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "weighing options") {
+		t.Fatalf("reasoning summary lost: %+v", msgs)
 	}
 }

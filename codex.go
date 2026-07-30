@@ -212,7 +212,7 @@ type CodexPayload struct {
 	Name      string       `json:"name"`
 	Arguments string       `json:"arguments"`
 	Output    CodexCallOut `json:"output"`
-	Summary   []CodexPart  `json:"summary"`
+	Summary   codexParts   `json:"summary"`
 
 	Timestamp string `json:"timestamp"`
 }
@@ -235,6 +235,26 @@ type CodexPart struct {
 
 type CodexCallOut struct {
 	Content string `json:"content"`
+}
+
+// codexParts decodes codex's `summary`, which is an array of parts on a
+// response_item but a bare string ("auto") on a turn_context. Decoding it
+// strictly fails the whole turn_context line — and that line is the only place
+// the model name appears, so every codex session indexed as model-unknown.
+type codexParts []CodexPart
+
+func (s *codexParts) UnmarshalJSON(data []byte) error {
+	for i, c := range data {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '[':
+			type alias codexParts
+			return JSONUnmarshal(data[i:], (*alias)(s))
+		}
+		break
+	}
+	return nil // a scalar summary carries no parts
 }
 
 func (o *CodexCallOut) UnmarshalJSON(data []byte) error {
