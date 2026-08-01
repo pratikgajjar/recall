@@ -8,40 +8,72 @@ manually in `autoresearch/results.jsonl`, and commits made in lockstep.
 
 ## Objective
 
-Make `recall` indispensable on its own merits:
+recall has three jobs. Optimising any one of them in isolation is how a tool
+ends up fast, cheap and wrong — indexing less makes it quicker and cheaper and
+useless; showing more makes it more useful and dearer. So all three are scored
+on the same 0-100 scale, **weighted equally**, and every sub-score is published
+so a gain on one axis can never quietly pay for a loss on another.
 
-> Indexing real chat history must feel **free**. Search must feel **instant**.
+| Axis | The question | Failure it prevents |
+|---|---|---|
+| **Reliability** | Is everything on disk in the index, and can it be found? | Silent data loss. The worst failure: recall answers confidently from a corpus with holes in it. |
+| **Performance** | How long does anyone wait? | A tool too slow to reach for. |
+| **Cost** | How many tokens does an answer take? | An agent that can afford only one lookup per task. |
 
 ## Primary metric
 
-**`full_index_seconds`** — wall-clock seconds for `recall index --full` from
-a cold start (`rm -rf ~/.recall` first). Current ≈80s on real data (1,514
-Cursor + 27 Claude + 1,058 Codex sessions; 96k messages; ~4 GB of blobs).
+**`recall_score`** — the equally-weighted mean of the three axis scores, each
+itself the mean of its sub-scores. Direction: **higher is better.**
 
-Direction: **lower is better.**
+    autoresearch/score.py            # full run, ~4 min
+    autoresearch/score.py --quick    # reuse the cached fresh index
+    autoresearch/score.py --json     # for the loop
 
-Why this metric: incremental indexing already hit 10ms — essentially free
-on the hot loop. The remaining friction is the first-time setup cost, which
-also dominates the developer feedback loop when iterating on adapters.
-Cursor full scan is ~58s of the 80s — the JSON-decode pass through 245k
-bubble blobs is the largest single cost.
+### The rubric
 
-### Earlier primary (kept as secondary)
+Anchors are **absolute**, not "yesterday's number": each sub-score names a floor
+worth 0 and a target worth 100, chosen from what recall should plausibly
+achieve. The score therefore says how good recall *is*, not merely whether it
+moved. 100 everywhere should be hard and should mean something.
 
-**`incremental_index_ms`** — re-run with no source changes. Hit 10ms in
-commit ca802e8. We monitor it; do not regress.
+| Sub-score | Measures | 0 pts | 100 pts |
+|---|---|---|---|
+| **Reliability** ||||
+| `coverage_sessions` | sessions on disk present in the index | 90% | 100% |
+| `coverage_prose` | sessions holding the prose recall intends to index | 60% | 100% |
+| `integrity` | free of duplicate and stale rows | 98% | 100% |
+| `findability` | a real sentence retrieves its own session | 80% | 100% |
+| `searchable_prose` | prose surviving the index-time truncation cap | 80% | 100% |
+| **Performance** ||||
+| `search_latency` | search p95 | 1000 ms | 50 ms |
+| `transcript_latency` | transcript p95 | 2000 ms | 100 ms |
+| `cold_index` | first full index | 180 s | 30 s |
+| `incremental_index` | re-index with nothing changed | 30 s | 2 s |
+| **Cost** ||||
+| `token_cost` | characters the replayed workload costs | 1600 kch | 400 kch |
+| `ranking` | MRR of the right session | 0 | 1.0 |
+| `retrieval_hit` | the right session appears at all | 0% | 100% |
+
+### Where the instruments point
+
+Reliability is measured against an index built from **the disk as it is now**;
+auditing the frozen corpus reports every session created since the freeze as
+missing, and inherits defects already fixed. Cost and ranking are measured
+against the **frozen corpus** at `~/.recall/bench.sqlite`, because those numbers
+only compare across rounds if the corpus holds still.
+
+`autoresearch/audit.py` is written **without recall's own parsing code** and
+reads the raw session files itself. An audit that shares code with the thing it
+audits cannot detect the bug where that code drops data — which has happened
+twice here: codex once dropped 2,336 of 2,336 lines behind a decode error, and
+claude tool calls went unattributed for three rounds because the local corpus
+never exercised them.
 
 ## Secondary metrics (watched, not optimized for)
 
-- `incremental_index_ms` — must stay <50ms.
-- `incremental_one_new_ms` — re-run after one new chat appeared in one source.
-- `query_ms` — `recall "import cycle" --limit 5` p50, includes cold-start
-  overhead of the Go binary. Acceptable up to 100ms.
-- `index_size_mb` — disk footprint. Acceptable up to ~150 MB on this corpus.
-- `binary_size_mb` — `go build` output. Acceptable up to 15 MB.
-
-A primary improvement is kept even if a secondary regresses, unless the
-secondary regresses catastrophically (e.g. binary doubles, query >100ms).
+Every sub-score above is reported on every run. The axis scores are what get
+compared; a change that lifts `recall_score` while dropping any axis by more
+than a point needs its trade stated explicitly in the result description.
 
 ## Benchmark protocol
 
