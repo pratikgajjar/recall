@@ -434,3 +434,23 @@ reliability axis exists to prevent.
 
 `findability_deep` now measures phrases from past 3,000 characters across prose
 and tool output both, so this trade is visible next time rather than free.
+
+## Tested, not changed: tailWeight
+
+`tailWeight` discounts matches in the tail column. It is a query-time bm25
+argument, so it can be A/B'd against one index without reindexing.
+
+| weight | deep findability (n=90) | MRR vs 0.25 |
+|---|---|---|
+| 0.25 (current) | 71.1% | — |
+| 0.5 | 73.3% | 0.0% |
+| 1.0 | 75.6% | **-8.4%** (found -1, rank@3 -3) |
+
+1.0 reproduces the loss the three equal-weight indexing experiments showed,
+which is a good sign the measurements are consistent with each other.
+
+0.5 looks free — identical MRR, slightly better deep retrieval — but +2 hits out
+of 90 is well inside binomial noise (σ ≈ 4.3). Left at 0.25: moving a constant
+for a noise-level gain is fitting the benchmark, not improving the tool. Worth
+revisiting only with a deep-retrieval sample large enough to resolve a few
+points, which this corpus can support if the probe is made cheaper.

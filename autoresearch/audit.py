@@ -251,7 +251,7 @@ def doc_freq(con, phrase):
 BOILERPLATE_DF = 30
 
 
-def deep_findability(db_path, sample=40, seed=11):
+def deep_findability(db_path, sample=80, seed=11):
     """Can a phrase from deep inside a long message retrieve its session?
 
     findability() draws from the opening of prose messages, so it says nothing
@@ -294,7 +294,12 @@ def deep_findability(db_path, sample=40, seed=11):
             text = "\n".join(prose_parts(m.get("content")))
             if len(text) < 5000:
                 continue
-            for cand in candidate_phrases(text[3000:], limit=1):
+            # Start at a word boundary. Slicing at a fixed offset cuts words in
+            # half — "guardrails" becomes "ardrails" — and then queries for a
+            # token that exists in no index, scoring a retrieval failure that
+            # never happened. It understated deep findability by ~14 points.
+            cut = text.find(" ", 3000) + 1
+            for cand in candidate_phrases(text[cut:], limit=1):
                 pairs.append((f"{source}:{sid}", cand))
                 break
             break
