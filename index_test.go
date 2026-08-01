@@ -849,3 +849,28 @@ func TestJSONOutputIsAlwaysValidUTF8(t *testing.T) {
 		t.Errorf("emitted JSON does not parse: %v", err)
 	}
 }
+
+// A single message can be enormous — a pasted design doc, a megabyte of HAR.
+// It must window all the way through rather than stop at an arbitrary depth,
+// while still refusing to expand without limit.
+func TestHugeMessageIsWindowedThroughout(t *testing.T) {
+	// Distinct words throughout, so nothing collapses as a duplicate window.
+	var b strings.Builder
+	for i := 0; b.Len() < 300_000; i++ {
+		fmt.Fprintf(&b, "paragraph%d discusses topic%d in detail. ", i, i*7)
+	}
+	head, tail := splitForIndex(b.String())
+	joined := head + " " + strings.Join(tail, " ")
+	for _, probe := range []string{"paragraph1 ", "paragraph2000 ", "paragraph5000 "} {
+		if strings.Contains(b.String(), probe) && !strings.Contains(joined, probe) {
+			t.Errorf("%q is in the message but reaches no window", probe)
+		}
+	}
+	if len(tail) > maxChunks {
+		t.Errorf("%d windows, maxChunks is %d", len(tail), maxChunks)
+	}
+	// The bound must still hold for something absurd.
+	if _, huge := splitForIndex(strings.Repeat("abcdefghij ", 2_000_000)); len(huge) > maxChunks {
+		t.Errorf("unbounded: %d windows", len(huge))
+	}
+}

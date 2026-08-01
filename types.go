@@ -69,10 +69,16 @@ const tailWeight = 0.25
 
 // Windowing bounds for the tail column (see splitForIndex).
 const (
-	// maxChunks bounds the pathological case: a few messages in a real corpus
-	// are over a megabyte of pasted log and would otherwise become hundreds of
-	// rows each.
-	maxChunks    = 40
+	// maxChunks bounds a single message's windows. At 40 it left 3.5M
+	// characters of real corpus unreachable — 7 messages, but among them a
+	// pasted design document and an article, not only the stack traces and HAR
+	// dumps you would expect. Indexing all of it costs 1.4% more rows and
+	// measured no ranking change at all, since content like that competes for
+	// no ordinary query.
+	//
+	// 1000 windows is 1.5MB of text in one message; past that it is a file
+	// somebody pasted, and its opening plus a megabyte is ample to find it by.
+	maxChunks    = 1000
 	chunkOverlap = 150
 	chunkSnap    = 200
 )
