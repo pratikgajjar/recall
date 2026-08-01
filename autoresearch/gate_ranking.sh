@@ -47,10 +47,12 @@ for side in control treat; do
   fi
 done
 
-# rank_live invokes ./recall; both indexes must be read by the same reader so
-# the only difference measured is what got written into them.
-out=$(autoresearch/rank_live.py --index "$work/control.sqlite" \
-                                --compare "$work/treat.sqlite" --json)
+# Each arm must run its OWN binary against its OWN index. Using one reader for
+# both only tests what got written; a change to how a query is executed lives in
+# the binary, and would show a flat zero delta no matter how much it altered.
+out=$(autoresearch/rank_live.py --index "$work/control.sqlite" --bin "$CTRL_BIN" \
+                                --compare "$work/treat.sqlite" --compare-bin "$work/treat" \
+                                --json)
 echo "$out" | python3 -c '
 import json,sys,os
 d=json.load(sys.stdin); a,b=d["a"],d["b"]

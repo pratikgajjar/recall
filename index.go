@@ -671,6 +671,13 @@ func (ix *Index) Search(query string, opts SearchOpts) ([]Hit, error) {
 }
 
 func (ix *Index) searchMatch(ftsQuery string, opts SearchOpts) ([]Hit, error) {
+	// An unfiltered search can use FTS5's top-n fast path; a filtered one wants
+	// SQLite to push the filter into the scan instead. They need different
+	// query shapes, and using either shape for both is a 10x loss one way or
+	// the other.
+	if !ix.filtered(opts) {
+		return ix.searchPooled(ftsQuery, opts)
+	}
 
 	args := []any{ftsQuery}
 	where := []string{"messages_fts MATCH ?"}
@@ -755,6 +762,11 @@ LIMIT ?`
 		return nil, err
 	}
 	defer rows.Close()
+	return ix.scanHits(rows, opts)
+}
+
+// scanHits reads result rows and collapses them the way the caller expects.
+func (ix *Index) scanHits(rows *sql.Rows, opts SearchOpts) ([]Hit, error) {
 	var hits []Hit
 	seen := map[string]int{}
 	for rows.Next() {
@@ -781,6 +793,72 @@ LIMIT ?`
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
+}
+
+// filtered reports whether the caller narrowed the search to a subset of
+// sessions. Such a search is already cheap — restricting to a session or a repo
+// cuts the candidate set before ranking — and it cannot be pooled, because the
+// best rows overall may contain none from the subset asked for.
+func (ix *Index) filtered(opts SearchOpts) bool {
+	return opts.SessionID != "" || opts.Source != "" || opts.Project != "" ||
+		opts.After > 0 || opts.Before > 0 || len(opts.Tags) > 0
+}
+
+// searchPooled answers an unfiltered search without materialising every match.
+//
+// FTS5 resolves `ORDER BY rank LIMIT n` with a top-n heap. Ordering by an
+// expression instead — the recency tiebreak — defeats that, so every matching
+// row has to be built and sorted: 112,000 of them for a query like "post
+// engineering channel staging is free taking". That was search p95 1,500ms
+// against a 21ms median.
+//
+// Take a pool of the best rows by pure bm25, which FTS5 does cheaply, and apply
+// the tiebreak to those. The tiebreak only ever reorders near-ties, so the top
+// of the ranking is the only place it was doing anything: across 223 real
+// searches this returns the identical result order.
+func (ix *Index) searchPooled(ftsQuery string, opts SearchOpts) ([]Hit, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	pool := limit * poolFactor
+	if pool < poolMin {
+		pool = poolMin
+	}
+	q := `
+SELECT id, source, source_id, project, title, started_at, idx, role, snippet, rank FROM (
+  SELECT s.id AS id, s.source AS source, s.source_id AS source_id,
+         COALESCE(s.project,'') AS project, COALESCE(s.title,'') AS title,
+         COALESCE(s.started_at,0) AS started_at,
+         t.idx AS idx, t.role AS role, t.snippet AS snippet, t.rank AS rank
+    FROM (SELECT f.session_pk AS pk, f.idx AS idx, f.role AS role,
+                 snippet(messages_fts, 3, '«', '»', '…', 12) AS snippet,
+                 bm25(messages_fts) AS rank
+            FROM messages_fts f
+           WHERE messages_fts MATCH ?
+           ORDER BY rank LIMIT ?) t
+    JOIN sessions s ON s.id = t.pk
+  UNION ALL
+  SELECT s.id, s.source, s.source_id,
+         COALESCE(s.project,''), COALESCE(s.title,''),
+         COALESCE(s.started_at,0),
+         -1 AS idx, 'title' AS role, t.snippet, t.rank
+    FROM (SELECT sessions_fts.session_pk AS pk,
+                 '['||snippet(sessions_fts, 1, '«', '»', '…', 12)||']' AS snippet,
+                 bm25(sessions_fts) * 1.4 AS rank   -- title hits get a small boost
+            FROM sessions_fts
+           WHERE sessions_fts MATCH ?
+           ORDER BY rank LIMIT ?) t
+    JOIN sessions s ON s.id = t.pk
+)
+ORDER BY (rank * 1.0) - (started_at / 1.0e13) ASC
+LIMIT ?`
+	rows, err := ix.db.Query(q, ftsQuery, pool, ftsQuery, pool, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return ix.scanHits(rows, opts)
 }
 
 func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {

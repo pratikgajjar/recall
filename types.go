@@ -53,3 +53,11 @@ type Adapter interface {
 }
 
 const excerptMax = 1500
+
+// Search ranks a pool of the best rows by bm25 and applies the recency tiebreak
+// to those, rather than to every match. poolFactor sets how much bigger the pool
+// is than the caller's limit; poolMin keeps it sane for small limits.
+const (
+	poolFactor = 8
+	poolMin    = 200
+)

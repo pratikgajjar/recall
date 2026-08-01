@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -615,5 +616,63 @@ func TestMissingSessionErrorIsActionable(t *testing.T) {
 	// The real session still resolves.
 	if _, err := ix.LookupSession(full); err != nil {
 		t.Errorf("valid id broke: %v", err)
+	}
+}
+
+// An unfiltered search ranks a pool of best-by-bm25 rows instead of every match,
+// which is what took search p95 from 1,500ms to under 200ms. That is only sound
+// when nothing narrows the search: the globally best rows may contain none from
+// the subset the caller asked for. Filtering after pooling returned an empty
+// list on a corpus full of answers, twice, so it is pinned here.
+func TestFilteredSearchIsNotPooled(t *testing.T) {
+	ix := newTestIndex(t)
+	ctx := context.Background()
+
+	// Enough noise that the wanted session cannot be in any global top-N.
+	var sessions []Session
+	var msgs []Message
+	for i := 0; i < poolMin*2; i++ {
+		id := fmt.Sprintf("noise-%d", i)
+		sessions = append(sessions, Session{Source: "pi", SourceID: id,
+			Project: "/work/other", Title: "noise", MsgCount: 1})
+		msgs = append(msgs, Message{SourceID: id, Idx: 0, Role: "user",
+			Text: "shibboleth appears here among a great many other sessions"})
+	}
+	// One session in a different project, deliberately last so a pool that
+	// ignored the filter would cut it.
+	sessions = append(sessions, Session{Source: "pi", SourceID: "wanted",
+		Project: "/work/needle", Title: "wanted", MsgCount: 1})
+	msgs = append(msgs, Message{SourceID: "wanted", Idx: 0, Role: "user",
+		Text: "shibboleth appears here too, in the project being asked about"})
+	if err := ix.IngestBatch(ctx, "pi", sessions, msgs); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := ix.Search("shibboleth", SearchOpts{Project: "/work/needle", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("filtered search returned nothing; the filter was applied after the pool")
+	}
+	for _, h := range hits {
+		if h.Project != "/work/needle" {
+			t.Errorf("hit from %q leaked past the project filter", h.Project)
+		}
+	}
+
+	// The unfiltered search still works and still ranks.
+	all, err := ix.Search("shibboleth", SearchOpts{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 5 {
+		t.Errorf("unfiltered search returned %d hits, want 5", len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i].Rank < all[i-1].Rank-0.5 {
+			t.Errorf("results are not in rank order at %d: %v then %v",
+				i, all[i-1].Rank, all[i].Rank)
+		}
 	}
 }

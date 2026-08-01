@@ -68,12 +68,16 @@ def extract_pairs(root):
     return pairs
 
 
-def measure(pairs, index_path, limit=15):
+def measure(pairs, index_path, limit=15, binary=None):
+    """Run the real queries. `binary` matters as much as `index_path`: a change
+    to how a query is executed lives in the binary, and comparing two indexes
+    with one binary cannot see it at all."""
     env = dict(os.environ)
     env["RECALL_INDEX"] = index_path
+    exe = binary or BIN
     ranks = []
     for p in pairs:
-        argv = [BIN, p["query"], "--json", "--limit", str(limit)]
+        argv = [exe, p["query"], "--json", "--limit", str(limit)]
         if p.get("repo"):
             argv += ["--repo", p["repo"]]
         try:
@@ -99,6 +103,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--index", default=os.path.expanduser("~/.recall/bench.sqlite"))
     ap.add_argument("--compare", help="second index; prints an A/B")
+    ap.add_argument("--bin", help="binary for --index (defaults to ./recall)")
+    ap.add_argument("--compare-bin", help="binary for --compare")
     ap.add_argument("--sessions", default=os.path.expanduser("~/.pi/agent/sessions"))
     ap.add_argument("--refresh", action="store_true", help="re-extract pairs from history")
     ap.add_argument("--json", action="store_true")
@@ -113,7 +119,7 @@ def main():
         print("no query->read pairs found", file=sys.stderr)
         return 1
 
-    base = measure(pairs, a.index)
+    base = measure(pairs, a.index, binary=a.bin)
     if not a.compare:
         print(json.dumps(base) if a.json else
               f"  {a.index}\n  found {base['found']}/{base['pairs']} "
@@ -121,7 +127,7 @@ def main():
               f"rank@3 {base['rank_at_3']}  MRR {base['mrr']}")
         return 0
 
-    other = measure(pairs, a.compare)
+    other = measure(pairs, a.compare, binary=a.compare_bin or a.bin)
     if a.json:
         print(json.dumps({"a": base, "b": other}))
         return 0
