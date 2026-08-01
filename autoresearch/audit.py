@@ -26,6 +26,7 @@ Usage:
 """
 import argparse
 import collections
+import hashlib
 import glob
 import json
 import os
@@ -69,6 +70,19 @@ def session_id_from(path, head):
     base = os.path.splitext(os.path.basename(path))[0]
     m = UUID_RE.findall(base)
     return m[-1] if m else base
+
+
+def stable_order(items, seed, key=str):
+    """Order deterministically by content, not by how many items there are.
+
+    rng.shuffle() reorders everything when the corpus grows: adding seven
+    sessions to seventeen hundred changed 68% of the sample, which moved
+    findability 100% -> 98% and deep findability 86.8% -> 80.3% with no code
+    change at all. Hashing each item instead means a new session displaces at
+    most one, so a measurement taken today is comparable with yesterday's.
+    """
+    return sorted(items, key=lambda i: hashlib.sha1(
+        (str(seed) + "\x00" + key(i)).encode()).hexdigest())
 
 
 def excerpt_cap():
@@ -264,7 +278,6 @@ def deep_findability(db_path, sample=80, seed=11):
     Phrases are drawn from past 3,000 characters, across prose and tool output
     both, in the proportion they occur.
     """
-    rng = random.Random(seed)
     env = dict(os.environ)
     env["RECALL_INDEX"] = db_path
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -272,7 +285,7 @@ def deep_findability(db_path, sample=80, seed=11):
     files = []
     for root in JSONL_SOURCES.values():
         files.extend(glob.glob(os.path.expanduser(root) + "/**/*.jsonl", recursive=True))
-    rng.shuffle(files)
+    files = stable_order(files, seed)
     for path in files:
         if len(pairs) >= sample:
             break
@@ -354,9 +367,7 @@ def findability(disk, db_path, sample, seed=7):
     failures — nothing can retrieve a session by text it shares with 200 others,
     and hiding that in the score would just make it noisy.
     """
-    rng = random.Random(seed)
-    keys = list(disk)
-    rng.shuffle(keys)
+    keys = stable_order(disk, seed, key=lambda k: f"{k[0]}:{k[1]}")
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     env = dict(os.environ)
     env["RECALL_INDEX"] = db_path
