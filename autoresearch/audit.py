@@ -309,7 +309,16 @@ def deep_findability(db_path, sample=80, seed=11):
     # retrieval: 29 of 35 failures were phrases shared by more than 30 sessions
     # — a repeated ssh command, a Go context idiom — which no ranking can
     # attribute to one session.
-    found = boiler = 0
+    def holders(phrase):
+        """Every session whose indexed text contains this phrase."""
+        try:
+            return {r[0] for r in con.execute(
+                "SELECT DISTINCT session_pk FROM messages_fts WHERE messages_fts MATCH ?",
+                ('"' + phrase.replace('"', "") + '"',))}
+        except sqlite3.OperationalError:
+            return set()
+
+    found = boiler = equivalent = 0
     for want, q in pairs:
         if doc_freq(con, q) > BOILERPLATE_DF:
             boiler += 1
@@ -321,10 +330,19 @@ def deep_findability(db_path, sample=80, seed=11):
         except Exception:
             continue
         found += want in ids
+        # Identical text often lives in several sessions — the same error
+        # string, the same pasted paragraph. Returning one of those answers the
+        # question even though the probe named a different id. Reported, not
+        # scored: judging a search by whether it found the *content* is the
+        # fairer question, but it is also a weaker one, and it would soften
+        # exactly the ranking regressions this audit exists to catch.
+        if want in ids or (holders(q) & set(ids)):
+            equivalent += 1
     con.close()
     n = len(pairs) - boiler
     return {"sampled": n, "found": found, "boilerplate_only": boiler,
-            "found_pct": round(100.0 * found / n, 1) if n else 0.0}
+            "found_pct": round(100.0 * found / n, 1) if n else 0.0,
+            "content_found_pct": round(100.0 * equivalent / n, 1) if n else 0.0}
 
 
 def findability(disk, db_path, sample, seed=7):
@@ -482,6 +500,8 @@ def main():
         print(f"searchable prose     {out['searchable_prose_pct']}% of "
               f"{out['prose_chars']:,} chars survive excerptMax={cap} "
               f"({out['parts_truncated']:,}/{out['parts_total']:,} parts cut)")
+        print(f"  (content reachable under some id: "
+              f"{deep.get('content_found_pct')}%)")
         print(f"deep findability     {out['findability_deep_pct']}% "
               f"({deep['found']}/{deep['sampled']} phrases from past 3,000 chars, "
               f"prose and tool output)")

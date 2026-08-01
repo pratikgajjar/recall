@@ -545,3 +545,32 @@ tiebreak sees it, which is a real behaviour change with no upside.
 
 The two shapes exist for a reason: a filter narrows before ranking, no filter
 needs ranking to narrow. Reverted.
+
+## findability_deep is close to its meaningful ceiling
+
+Four attempts have now failed to raise deep ranking: a larger excerpt cap,
+equal-weight windows at depth 3 and 40, a tailWeight sweep, and exempting the
+AND pass from the tail discount. Three of those failed the ranking gate; the
+fourth moved 2 hits in 120, inside noise.
+
+Looking at what actually fails is more useful than a fifth attempt. Of 9 misses
+in 68 probes, the top-ranked results carry *the same matched text as the wanted
+session*:
+
+    query   'raise RuntimeError OpenSearchV GetAllBackend requires SEARCH BAC'
+      #1    …raise RuntimeError("CI requires the OpenSearch v3 acc…
+      #2    …raise RuntimeError("OpenSearchV3Store requires V3_SEAR…
+      #3    …raise RuntimeError("OpenSearchV3GetAllBackend requires…
+
+The same error string, the same pasted paragraph, in several sessions. Recall
+returns equally valid answers and the probe demands one particular id. Judged by
+whether the *content* was reached, deep findability is 91.2% rather than 86.8%.
+
+That looser number is now reported but deliberately **not** scored. It is the
+fairer question, and it is also weaker: it would soften precisely the ranking
+regressions the audit exists to catch. Three of the nine misses are this; the
+other six are real.
+
+Concretely: the remaining gap is roughly 6 probes in 68, and it is competition
+between genuinely similar content, not a defect in how deep text is indexed.
+Anyone attacking this again should first show the failures are not this.
