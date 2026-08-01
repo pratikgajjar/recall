@@ -316,8 +316,23 @@ const outlineBudget = 4000
 
 func renderOutline(w io.Writer, s *Session, msgs []Message, opts transcriptOpts) error {
 	// Render at full density first; if that blows the budget, fall back to
-	// chapters. An explicit role filter means the caller stated what they want,
-	// so it is honoured as-is (same rule applyBigSessionCap follows).
+	// chapters. An explicit role filter says WHICH roles are wanted, not that
+	// any amount of them is wanted: asking for role=user,assistant on a 1,991
+	// message session returned a 40,000-character "outline", which is the thing
+	// an outline exists to avoid reading.
+	if opts.Roles != "" {
+		var probe strings.Builder
+		if err := renderOutlineAt(&probe, s, msgs, opts, false); err != nil {
+			return err
+		}
+		if probe.Len() <= outlineBudget {
+			_, err := io.WriteString(w, probe.String())
+			return err
+		}
+		// Chapter density would contradict the filter, so deliver a prefix and
+		// say plainly where it stops and how to continue from there.
+		return clipOutline(w, probe.String(), len(msgs))
+	}
 	if opts.Roles == "" {
 		var probe strings.Builder
 		if err := renderOutlineAt(&probe, s, msgs, opts, false); err != nil {
@@ -336,6 +351,42 @@ func renderOutline(w io.Writer, s *Session, msgs []Message, opts transcriptOpts)
 	}
 	return renderOutlineAt(w, s, msgs, opts, false)
 }
+
+// clipOutline delivers as much of a role-filtered outline as the budget allows
+// and names the rest. Cutting silently would leave the caller believing they had
+// seen the whole session.
+func clipOutline(w io.Writer, full string, total int) error {
+	lines := strings.SplitAfter(full, "\n")
+	var out strings.Builder
+	shown := 0
+	for i, ln := range lines {
+		if out.Len()+len(ln) > outlineBudget && i > 0 {
+			break
+		}
+		out.WriteString(ln)
+		shown = i + 1
+	}
+	if _, err := io.WriteString(w, out.String()); err != nil {
+		return err
+	}
+	if shown >= len(lines) {
+		return nil
+	}
+	// The first line not delivered names the position to resume from.
+	next := 0
+	if m := outlinePos.FindStringSubmatch(lines[shown]); m != nil {
+		next, _ = strconv.Atoi(m[1])
+	}
+	_, err := fmt.Fprintf(w, "// outline clipped at msg %d of %d (%s more)."+
+		" Continue with outline=true range='%d:', or search with session_id to jump"+
+		" straight to a msg_idx.\n",
+		next, total, humanChars(len(full)-out.Len()), next)
+	return err
+}
+
+// outlinePos matches the position marker an outline line starts with, "[12]" or
+// "[12-19]", so a clipped outline can say where to resume.
+var outlinePos = regexp.MustCompile(`^\[(\d+)`)
 
 // renderOutlineAt emits the outline. When chaptersOnly is set, assistant prose
 // is folded into the surrounding tool run instead of getting its own line.

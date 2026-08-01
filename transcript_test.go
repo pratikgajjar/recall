@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -505,5 +506,64 @@ func TestToolMarkerNamesWithArguments(t *testing.T) {
 		if only && strings.Join(got, ",") != strings.Join(c.names, ",") {
 			t.Errorf("%q: names=%v want %v", c.in, got, c.names)
 		}
+	}
+}
+
+// A role filter says WHICH roles are wanted, not that any amount of them is
+// wanted. Asking for role=user,assistant on a 1,991-message session returned a
+// 40,000-character "outline" — the thing an outline exists to avoid reading.
+func TestFilteredOutlineIsBudgetedAndPageable(t *testing.T) {
+	msgs := make([]Message, 600)
+	for i := range msgs {
+		role := "assistant"
+		if i%3 == 0 {
+			role = "user"
+		}
+		msgs[i] = Message{Idx: i, Role: role,
+			Text: fmt.Sprintf("message %d: %s", i, strings.Repeat("content ", 12))}
+	}
+	s := &Session{Source: "pi", SourceID: "big", Title: "big", MsgCount: len(msgs)}
+
+	var buf strings.Builder
+	if err := renderOutline(&buf, s, msgs, transcriptOpts{Roles: "user,assistant"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if len(out) > outlineBudget*2 {
+		t.Errorf("filtered outline is %d chars, budget is %d", len(out), outlineBudget)
+	}
+	// Truncating silently would leave the caller believing they saw it all.
+	if !strings.Contains(out, "clipped") {
+		t.Error("a clipped outline must say so")
+	}
+	if !strings.Contains(out, "range=") {
+		t.Error("a clipped outline must say how to continue")
+	}
+
+	// The position it names must be real and must move forward.
+	m := regexp.MustCompile(`range='(\d+):'`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatal("no resumable position named")
+	}
+	next, _ := strconv.Atoi(m[1])
+	if next <= 0 || next >= len(msgs) {
+		t.Fatalf("resume position %d is not inside the session", next)
+	}
+	var page2 strings.Builder
+	if err := renderOutline(&page2, s, msgs, transcriptOpts{
+		Roles: "user,assistant", Range: fmt.Sprintf("%d:", next)}); err != nil {
+		t.Fatalf("the continuation it suggested does not work: %v", err)
+	}
+	if page2.Len() == 0 {
+		t.Error("continuing from the named position returned nothing")
+	}
+
+	// A small filtered outline is untouched.
+	var small strings.Builder
+	if err := renderOutline(&small, s, msgs[:5], transcriptOpts{Roles: "user,assistant"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(small.String(), "clipped") {
+		t.Error("a short outline should not be clipped")
 	}
 }
