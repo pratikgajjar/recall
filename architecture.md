@@ -1,7 +1,7 @@
 # recall architecture
 
 recall is a **host**, not a fixed set of integrations. It owns indexing, search,
-and MCP; *what* gets indexed is defined by plugins. New sources — a new agent, an
+and the skill; *what* gets indexed is defined by plugins. New sources — a new agent, an
 Obsidian vault, a knowledge graph — are added as data and Lua, never by changing
 Go and cutting a release.
 
@@ -14,8 +14,8 @@ Everything reduces to one contract, defined in `types.go`:
 - an opaque **checkpoint** string — a resumable cursor recall stores per source
 
 recall handles the rest: incremental/offset-resumable scanning (`checkpoint.go`,
-`streaming.go`), batched FTS5 ingest (`index.go`), ranked search, and the MCP
-server (`mcp.go`). A source is anything that produces those records. "Chat" is
+`streaming.go`), batched FTS5 ingest (`index.go`), ranked search, and the CLI
+A source is anything that produces those records. "Chat" is
 just the shape where records are messages with `user`/`assistant`/`tool` roles;
 a note or a graph node is the same contract with a different role and grouping.
 
@@ -30,7 +30,7 @@ a note or a graph node is the same contract with a different role and grouping.
    anything a user wants to add without recompiling. This is the extension
    mechanism.
 
-Both satisfy the same `Adapter` interface, so search, `show`, `open`, MCP, and
+Both satisfy the same `Adapter` interface, so search, `show`, `open`, and
 `doctor` treat them identically. A plugin may even **override a built-in of the
 same id** — drop a `claude.lua` in your plugins dir and it replaces the Go Claude
 adapter, so you can iterate on a source without recompiling.

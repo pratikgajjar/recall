@@ -596,3 +596,17 @@ func printHitsWithContext(ctx context.Context, w io.Writer, ix *Index, hits []Hi
 	}
 	return nil
 }
+
+// applyBigSessionCap protects a caller from accidentally requesting a
+// 30k-message transcript. When no slice was requested and the session is big,
+// it switches to outline mode and returns a one-line note explaining how to
+// drill in with a 'range' on the next call.
+func applyBigSessionCap(opts transcriptOpts, msgCount int) (transcriptOpts, string) {
+	// Any explicit slice signal (range / outline / role filter) means the caller
+	// knows what they want — don't override.
+	if opts.Range != "" || opts.Outline || opts.Roles != "" || msgCount <= bigSessionThreshold {
+		return opts, ""
+	}
+	opts.Outline = true
+	return opts, fmt.Sprintf("// session has %d messages; defaulting to outline. Call recall_transcript again with range='FROM:TO' (e.g. range='-50:'), or role='user,assistant' to skip tool noise.\n\n", msgCount)
+}

@@ -4,9 +4,9 @@
 
 It's a thin wrapper over the [`recall`](https://github.com/pratikgajjar/recall) CLI, which indexes your conversations into a local SQLite FTS5 index. The extension shells out to that binary and exposes the index to the agent as tools.
 
-![recall_search running inside pi](./assets/demo.png)
+![recall running inside pi](./assets/demo.png)
 
-_The agent calls `recall_search` to find a past conversation, then reads it in full with `recall_transcript` — no copy-paste._
+_The agent runs `recall` to find a past conversation, then reads it back — no copy-paste._
 
 ## Install
 
@@ -32,20 +32,30 @@ For local development, load the extension ad-hoc:
 pi -e ./packages/pi-recall/src/index.ts
 ```
 
-## Tools
+## What it does
 
-| Tool | What it does |
-| --- | --- |
-| `recall_search` | Full-text search over past sessions. Returns ranked hits with `session_id` + `msg_idx`. Pass `session_id` to search *inside* one session; add `context` to read the surrounding messages in the same call. |
-| `recall_transcript` | Read a session — by `session_id`, or omit it for the most recent (filterable by repo/source/since). |
-| `recall_related` | Given a session id, find other sessions on the same topic. |
-| `recall_tag` | Durable bookmarks: `action: add` (default) \| `remove` \| `list`. Tags survive index rebuilds. |
+Nothing an agent has to learn a schema for. On session start it installs the
+`recall` skill and refreshes the index; after each agent turn it refreshes again
+in the background, so the index already reflects the conversation you are having.
 
-All search/list tools accept `repo` (pass `"."` for the current project),
-`source` (`cursor` \| `claude` \| `codex` \| `pi`), `since` (e.g. `7d`), and
-`tags` (filter to sessions carrying ALL given tags; AND). A tag may be a user
-tag or a reserved facet like `source:cursor` — `tags: ["source:cursor"]` is
-equivalent to `source: "cursor"`.
+It registers **no tools**. The agent runs the CLI:
+
+```bash
+recall "connection pool timeout" --limit 5      # search
+recall show pi:019f… --range 300:340            # read a slice
+recall "pool timeout" --in pi:019f… --context 5 # find and read, one call
+```
+
+A tool schema is re-sent on every single turn whether or not it is used, and it
+is a second description of flags the CLI already documents — two surfaces to
+keep in step, drifting apart. The skill is read once, when a task calls for it.
+
+Commands: `/recall-health`, `/recall-index`.
+Flags: `--recall-bin`, `--recall-auto-index`.
+
+Every search accepts `--repo` (`.` for the current project), `--since` (e.g.
+`7d`), and `--tag` (repeatable; AND). A tag may be a user tag or a reserved
+facet like `source:cursor`.
 
 ### Navigating large sessions
 
@@ -53,16 +63,16 @@ Some sessions are huge (thousands of messages). **To find a known topic inside
 one, search it — do not outline it:**
 
 ```jsonc
-recall_search { query: "connection pool timeout", session_id: "pi:019f…", context: 5 }
+recall "connection pool timeout" --in pi:019f… --context 5
 ```
 
 That is one call. Measured over real navigations: searching inside a session
-costs ~400 characters against ~4,000 to outline it, and `context` removes the
-follow-up `recall_transcript` entirely. `session_id: "."` scopes to the current
+costs ~400 characters against ~4,000 to outline it, and `--context` removes the
+follow-up read entirely. `--in .` scopes to the current
 session — how you recover something said before a compaction.
 
-Outline is for a session you know *nothing* about. `recall_transcript` takes
-three params to slice instead of dumping everything:
+Outline is for a session you know *nothing* about. `recall show` takes three
+flags to slice instead of dumping everything:
 
 - `range` — Python-style slice over the message list: `":100"` first 100,
   `"-50:"` last 50, `"305:315"` window. Negative indices count from the end.

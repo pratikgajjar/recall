@@ -95,3 +95,8 @@ const (
 	poolGrowthFactor = 4
 	poolGrowthSteps  = 2
 )
+
+// bigSessionThreshold is the message count past which an unsliced transcript
+// request is answered with an outline instead: reading a 30,000-message session
+// whole is never what anyone meant.
+const bigSessionThreshold = 200

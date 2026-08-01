@@ -208,7 +208,7 @@ def cost(index_path):
     raw = {
         "workload_kch": rep["total_kch"],
         "est_tokens": rep["est_tokens"],
-        "schema_chars": rep["schema_chars"],
+        "skill_chars": rep["skill_chars"],
         "outline_chars": rep["outline_chars"],
         "chars_search": rep["chars_search"],
         "chars_transcript": rep["chars_transcript"],
@@ -217,9 +217,11 @@ def cost(index_path):
         # Characters the whole replayed workload costs. 400k is roughly the
         # floor if every answer were perfectly targeted; 1600k is the original.
         "token_cost": norm(raw["workload_kch"], 1600.0, 400.0),
-        # The tool schema is re-sent on every single turn, whether or not recall
-        # is used: the one cost every agent pays unconditionally.
-        "schema_cost": norm(raw["schema_chars"], 8000.0, 2000.0),
+        # recall registers no tools, so nothing is re-sent every turn. The
+        # instruction surface is the skill file, read once when a task calls for
+        # it. Anchors are wider than the old schema's because it is paid far
+        # less often and can afford to teach properly.
+        "skill_cost": norm(raw["skill_chars"], 12000.0, 3000.0),
         # Outlines are the navigation surface — what an agent reads to decide
         # what to read. Cheap navigation is what makes a big session affordable.
         "outline_cost": norm(raw["outline_chars"], 400000.0, 100000.0),

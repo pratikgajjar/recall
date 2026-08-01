@@ -88,22 +88,16 @@ def main():
         if call["tool"] == "recall_transcript" and call["args"].get("outline"):
             outline_chars += n
 
-    # The MCP tool schema is re-sent on every agent turn, so it is a recurring
-    # cost the per-call replay cannot see. Measured here so it stays visible.
-    schema_chars = 0
+    # There is no tool schema any more: recall registers no tools, so nothing
+    # is re-sent every turn. What an agent must read to use it is the skill
+    # file, loaded once when the task calls for it. Same question — what does
+    # the instruction surface cost — asked of the surface that now exists.
+    skill_chars = 0
+    skill = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "skills", "recall", "SKILL.md")
     try:
-        r = subprocess.run([args.bin, "mcp"],
-                           input=b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n',
-                           capture_output=True, timeout=30, env=env)
-        for line in r.stdout.decode("utf-8", "replace").splitlines():
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("id") == 1 and "result" in d:
-                schema_chars = len(json.dumps(d["result"]["tools"]))
-                break
-    except Exception:
+        skill_chars = len(open(skill, encoding="utf-8").read())
+    except OSError:
         pass
 
     out = {
@@ -115,7 +109,7 @@ def main():
         "outline_chars": outline_chars,
         "rejected_calls": rejected,
         "failures": failures,
-        "schema_chars": schema_chars,
+        "skill_chars": skill_chars,
         **{"chars_" + k.replace("recall_", ""): v for k, v in per_tool.items()},
     }
     if args.json:

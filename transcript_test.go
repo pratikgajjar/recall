@@ -98,7 +98,7 @@ func TestRenderOutlineMatchesRange(t *testing.T) {
 
 func TestApplyBigSessionCap(t *testing.T) {
 	// Big session, no explicit slice → switch to outline + emit a note.
-	opts, prelude := applyBigSessionCap(transcriptOpts{}, mcpBigSessionThreshold+1)
+	opts, prelude := applyBigSessionCap(transcriptOpts{}, bigSessionThreshold+1)
 	if !opts.Outline || prelude == "" {
 		t.Errorf("big + no slice: want outline+note, got outline=%v prelude=%q", opts.Outline, prelude)
 	}
@@ -116,7 +116,7 @@ func TestApplyBigSessionCap(t *testing.T) {
 	}
 
 	// Small session → no cap, untouched.
-	opts, prelude = applyBigSessionCap(transcriptOpts{}, mcpBigSessionThreshold)
+	opts, prelude = applyBigSessionCap(transcriptOpts{}, bigSessionThreshold)
 	if opts.Outline || prelude != "" {
 		t.Errorf("small session must not be capped, got outline=%v", opts.Outline)
 	}

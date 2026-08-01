@@ -52,7 +52,6 @@ USAGE
   recall open <session-id>         reopen in the source tool (cursor://, claude --resume, …)
   recall stats [flags]             session/message counts by source/project
   recall index [--full]            (re)build the local index from all sources
-  recall mcp                       run an MCP server (Claude Code, Codex, Cursor, …)
   recall doctor                    health check
   recall skill install             refresh installed agent skill copies + source detection
   recall version
@@ -134,10 +133,6 @@ func main() {
 		}
 	case "related":
 		if err := runRelated(args); err != nil {
-			fatal(err)
-		}
-	case "mcp":
-		if err := runMCP(args); err != nil {
 			fatal(err)
 		}
 	case "tag":

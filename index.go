@@ -81,7 +81,7 @@ func openIndexRead(path string) (*Index, error) {
 	// A read handle is query_only, so it can't run migrateSchema (which DROPs/
 	// ALTERs). Guard instead: a stale on-disk schema would make queries return
 	// wrong data (e.g. snippet column indices shift), so refuse rather than lie.
-	// Write opens (index, mcp) migrate on open, so this only trips after a binary
+	// Write opens migrate on open, so this only trips after a binary
 	// upgrade before the first reindex.
 	var v string
 	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&v)

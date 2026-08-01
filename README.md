@@ -8,9 +8,9 @@ OpenAI Codex CLI, and pi — straight from their native storage. It does not mov
 copy, or modify your data. It builds a tiny searchable index over excerpts and
 metadata, and lets you grep the lot from your terminal.
 
-![recall_search running inside pi](packages/pi-recall/assets/demo.png)
+![recall running inside pi](packages/pi-recall/assets/demo.png)
 
-_Above: the [pi extension](packages/pi-recall) lets an agent call `recall_search`
+_Above: the [pi extension](packages/pi-recall) lets an agent run `recall`
 to find a past conversation and read it back — no copy-paste._
 
 ```
@@ -61,51 +61,27 @@ recall <query>
 
 Pure Go, no CGO. Builds a single static binary.
 
-## Use it in your agent (MCP)
+## Use it in your agent
 
-`recall mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
-server over stdio, so any MCP-capable harness can search your past chats. It
-exposes `recall_search` (omit the query to browse recent sessions), `recall_transcript`, `recall_related`
-and `recall_tag` (`action: add|remove|list`), and keeps the index warm in the
-background. The tool schema is deliberately terse — it is re-sent on every
-agent turn, so prose there is a recurring cost.
+recall is a CLI, and agents use it the way you would. There is no server and no
+tool schema: one surface, one set of flags, one thing to keep correct.
 
-**Claude Code**
-
-```bash
-claude mcp add recall -- recall mcp
-```
-
-**Codex** — add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.recall]
-command = "recall"
-args = ["mcp"]
-```
-
-**Cursor / Cline / Windsurf** — add to the client's `mcp.json`
-(e.g. `~/.cursor/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "recall": { "command": "recall", "args": ["mcp"] }
-  }
-}
-```
-
-**pi** — use the native extension instead (no MCP needed):
-`pi install npm:@pratikgajjar/pi-recall` ([packages/pi-recall](packages/pi-recall)).
-
-**As a skill** — for any agent with a skills system + shell access (Claude Code
-Agent Skills, pi skills), install the [`recall` skill](skills/recall) instead of
-a server. It teaches the agent to shell out to the CLI directly:
+**As a skill** — for any agent with a skills system and shell access (Claude
+Code Agent Skills, pi skills):
 
 ```bash
 npx skills add pratikgajjar/recall          # via the skills CLI (skills.sh)
 # or manually:  cp -r skills/recall ~/.claude/skills/recall
+# or from the binary, which carries its own copy:
+recall skill install
 ```
+
+**pi** — `pi install npm:@pratikgajjar/pi-recall`
+([packages/pi-recall](packages/pi-recall)). The extension installs the skill and
+keeps the index warm in the background. It registers no tools.
+
+**Anything else with shell access** — point it at `recall --help`. The skill
+file is just the short version of that, written for an agent.
 
 The skill is also embedded in the binary. `recall doctor` flags installed copies
 that have fallen behind it, and `recall skill install` refreshes them — a stale
@@ -134,7 +110,6 @@ recall tag -d <session-id> <tag>…  remove tags
 recall stats [flags]               sessions/messages/tokens/cost by source, project, model
 recall index [--full] [--prune]    (re)build the index; --prune drops sessions
                                    whose source was deleted (needs --full)
-recall mcp                         run an MCP server (Claude Code, Codex, Cursor, …)
 recall plugin list                 show bundled + installed Lua plugins
 recall plugin install <name>       install a bundled plugin into ~/.recall/plugins
 recall doctor                      health check
@@ -178,7 +153,7 @@ recall sessions --tag deploy-rca --tag source:cursor  # tag + facet, AND
 `source` is exposed as a reserved **facet** through the same `--tag` selector
 (`--tag source:cursor`) rather than a separate flag — one filter vocabulary,
 k8s-label style. Reserved facets are derived from the session, so you can filter
-by them but can't author them as tags. Agents can tag via the `recall_tag` MCP
+by them but can't author them as tags. Agents can tag with `recall tag` the
 tool to bookmark sessions worth remembering.
 
 ### Tokens and cost
@@ -285,11 +260,11 @@ See [`plugins/`](plugins/) for examples and
 - **Adapter trait.** Add a new tool = implement one interface (`Adapter` in `types.go`).
 
 Inspired by [`fff`](https://github.com/dmtrKovalenko/fff)'s pattern: thin index,
-live source reads, MCP-as-peer.
+live source reads.
 
 ## Status
 
-v0.1. Incremental indexing (append-only), an MCP server, and the pi extension
+v0.1. Incremental indexing (append-only) and the pi extension
 all work. A filesystem watcher and a TUI are next.
 
 ## Licence
