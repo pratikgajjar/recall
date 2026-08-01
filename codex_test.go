@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,8 +59,14 @@ func TestCodexScanFull(t *testing.T) {
 	if len(mm) != 3 {
 		t.Fatalf("want 3 messages (user, assistant, tool), got %d", len(mm))
 	}
-	if mm[2].Role != "tool" {
-		t.Errorf("function_call should map to tool role, got %q", mm[2].Role)
+	// The role is qualified with the tool name ("tool:shell") so a transcript can
+	// attribute the output; what must hold is that it still canonicalises to
+	// "tool", which is what --role filtering keys on.
+	if canonicalRole(mm[2].Role) != "tool" {
+		t.Errorf("function_call should canonicalise to tool, got %q", mm[2].Role)
+	}
+	if !strings.HasPrefix(mm[2].Role, "tool:") {
+		t.Errorf("function_call role should name its tool, got %q", mm[2].Role)
 	}
 	if next == "" {
 		t.Error("expected checkpoint")

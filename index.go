@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,7 +92,7 @@ func openIndexRead(path string) (*Index, error) {
 // schemaVersion bumps when the on-disk schema changes in a way bootstrap can't
 // reach via CREATE IF NOT EXISTS. Each bump triggers a one-shot migration in
 // migrateSchema() (drop legacy FTS, drop dead columns, clear checkpoints).
-const schemaVersion = "4"
+const schemaVersion = "5"
 
 func bootstrap(db *sql.DB) error {
 	stmts := []string{
@@ -128,6 +130,16 @@ func bootstrap(db *sql.DB) error {
 			PRIMARY KEY (session_id, tag)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag)`,
+		// messages_fts.session_pk is UNINDEXED, so deleting a session's rows by
+		// that column scans the whole FTS table. A session's messages are inserted
+		// consecutively, so their FTS rowids form a contiguous run: record the run
+		// and the delete becomes a seek on the FTS primary key instead.
+		`CREATE TABLE IF NOT EXISTS msg_ranges (
+			session_pk TEXT NOT NULL,
+			lo         INTEGER NOT NULL,
+			hi         INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_msg_ranges_pk ON msg_ranges(session_pk)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -171,6 +183,10 @@ func bootstrap(db *sql.DB) error {
 //   - →v4: add the usage columns (model, tokens, cost). ALTER-ADD is
 //     non-destructive, but existing rows have no usage data, so checkpoints
 //     are cleared to force one full rescan that backfills them.
+//   - →v5: add msg_ranges (created by bootstrap). Pre-v5 sessions have no range
+//     recorded; the delete falls back to the old scan for those and records a
+//     range on the way through, so the index heals itself as sessions are
+//     touched. No migration step and no forced rescan.
 func migrateSchema(db *sql.DB) error {
 	var version string
 	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version)
@@ -285,6 +301,39 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer upsertSess.Close()
 
+	// messages_fts.session_pk is UNINDEXED, so "DELETE ... WHERE session_pk = ?"
+	// cannot seek — it scans the whole FTS table, once per session. Measured on a
+	// cold build of 3,583 sessions that was 110s of a 155s run, against 3.3s to
+	// insert all 436k messages. Nothing exists to delete on a first index, so ask
+	// the sessions table (which does have a primary key) before paying for it.
+	sessionExists, err := tx.Prepare(`SELECT 1 FROM sessions WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer sessionExists.Close()
+
+	selRanges, err := tx.Prepare(`SELECT lo, hi FROM msg_ranges WHERE session_pk = ?`)
+	if err != nil {
+		return err
+	}
+	defer selRanges.Close()
+	delRange, err := tx.Prepare(`DELETE FROM messages_fts WHERE rowid BETWEEN ? AND ?`)
+	if err != nil {
+		return err
+	}
+	defer delRange.Close()
+	delRangeRows, err := tx.Prepare(`DELETE FROM msg_ranges WHERE session_pk = ?`)
+	if err != nil {
+		return err
+	}
+	defer delRangeRows.Close()
+	insRange, err := tx.Prepare(`INSERT INTO msg_ranges(session_pk, lo, hi) VALUES(?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer insRange.Close()
+
+	// Fallback for sessions indexed before v5, which have no recorded range.
 	delFTS, err := tx.Prepare(`DELETE FROM messages_fts WHERE session_pk = ?`)
 	if err != nil {
 		return err
@@ -325,19 +374,76 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer updAgg.Close()
 
+	// dropSessionRows removes a session's FTS rows. It seeks via the recorded
+	// rowid ranges; a session indexed before v5 has none, so it falls back to the
+	// scanning delete once and gets a range recorded on reinsert.
+	dropSessionRows := func(pk string) error {
+		rows, err := selRanges.Query(pk)
+		if err != nil {
+			return err
+		}
+		type span struct{ lo, hi int64 }
+		var spans []span
+		for rows.Next() {
+			var sp span
+			if err := rows.Scan(&sp.lo, &sp.hi); err != nil {
+				rows.Close()
+				return err
+			}
+			spans = append(spans, sp)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(spans) == 0 {
+			_, err := delFTS.Exec(pk) // pre-v5 session: no range to seek with
+			return err
+		}
+		for _, sp := range spans {
+			if _, err := delRange.Exec(sp.lo, sp.hi); err != nil {
+				return err
+			}
+		}
+		_, err = delRangeRows.Exec(pk)
+		return err
+	}
+
+	// Group by session, and keep one message per (session, idx). An adapter can
+	// legitimately emit the same session id twice in a batch — cursor-agent
+	// derives the id from a filename, and 7 transcripts exist both standalone and
+	// under subagents/ — which otherwise inserts every message twice under the
+	// same idx. Later wins: the fuller, more recent copy.
 	bySession := map[string][]Message{}
+	seenMsg := map[string]int{} // "sid\x00idx" -> position in bySession[sid]
 	for _, m := range msgs {
+		key := m.SourceID + "\x00" + strconv.Itoa(m.Idx)
+		if pos, dup := seenMsg[key]; dup {
+			bySession[m.SourceID][pos] = m
+			continue
+		}
+		seenMsg[key] = len(bySession[m.SourceID])
 		bySession[m.SourceID] = append(bySession[m.SourceID], m)
 	}
 
+	doneSession := map[string]bool{}
 	for _, s := range sessions {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		pk := source + ":" + s.SourceID
+		// Same reason: a repeated session in one batch would delete the rows the
+		// earlier pass just wrote and insert them again.
+		if !s.Append {
+			if doneSession[pk] {
+				continue
+			}
+			doneSession[pk] = true
+		}
 
 		if s.Append {
 			added := 0
+			var aLo, aHi int64 = -1, -1
 			for i, m := range bySession[s.SourceID] {
 				if i&4095 == 0 {
 					if err := ctx.Err(); err != nil {
@@ -348,10 +454,24 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 				if text == "" {
 					continue
 				}
-				if _, err := insFTS.Exec(pk, m.Idx, m.Role, text); err != nil {
+				res, err := insFTS.Exec(pk, m.Idx, m.Role, text)
+				if err != nil {
 					return fmt.Errorf("append msg %s/%d: %w", pk, m.Idx, err)
 				}
+				// Appended rows are a separate run from the session's earlier ones;
+				// record it too, or a later delete would leave them orphaned in FTS.
+				if rid, e := res.LastInsertId(); e == nil {
+					if aLo < 0 {
+						aLo = rid
+					}
+					aHi = rid
+				}
 				added++
+			}
+			if aLo >= 0 {
+				if _, err := insRange.Exec(pk, aLo, aHi); err != nil {
+					return err
+				}
 			}
 			u := withEstimate(s)
 			if _, err := updAgg.Exec(added, s.EndedAt, u.Model,
@@ -361,21 +481,28 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 			}
 			continue
 		}
+		// Check before the upsert creates the row.
+		var one int
+		hadRows := sessionExists.QueryRow(pk).Scan(&one) == nil
+
 		u := withEstimate(s)
 		if _, err := upsertSess.Exec(pk, source, s.SourceID, s.Project, s.Title,
 			s.StartedAt, s.EndedAt, s.MsgCount,
 			u.Model, u.TokensIn, u.TokensOut, u.CacheRead, u.CacheWrite, u.CostUSD, u.Estimated); err != nil {
 			return fmt.Errorf("upsert session %s: %w", pk, err)
 		}
-		if _, err := delFTS.Exec(pk); err != nil {
-			return err
-		}
-		if _, err := delSessFTS.Exec(pk); err != nil {
-			return err
+		if hadRows {
+			if err := dropSessionRows(pk); err != nil {
+				return err
+			}
+			if _, err := delSessFTS.Exec(pk); err != nil {
+				return err
+			}
 		}
 		if _, err := insSessFTS.Exec(pk, s.Title, s.Project); err != nil {
 			return fmt.Errorf("insert session_fts %s: %w", pk, err)
 		}
+		var lo, hi int64 = -1, -1
 		for i, m := range bySession[s.SourceID] {
 			if i&4095 == 0 {
 				if err := ctx.Err(); err != nil {
@@ -386,8 +513,21 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 			if text == "" {
 				continue
 			}
-			if _, err := insFTS.Exec(pk, m.Idx, m.Role, text); err != nil {
+			res, err := insFTS.Exec(pk, m.Idx, m.Role, text)
+			if err != nil {
 				return fmt.Errorf("insert msg %s/%d: %w", pk, m.Idx, err)
+			}
+			// Rows for one session go in consecutively, so the run is [first,last].
+			if rid, err := res.LastInsertId(); err == nil {
+				if lo < 0 {
+					lo = rid
+				}
+				hi = rid
+			}
+		}
+		if lo >= 0 {
+			if _, err := insRange.Exec(pk, lo, hi); err != nil {
+				return err
 			}
 		}
 	}
@@ -416,7 +556,22 @@ func withEstimate(s Session) Session {
 	return s
 }
 
+// toolArgSuffix matches the clipped argument an adapter appends after a
+// tool-call marker: "[tool:bash] git log --oneline" -> "[tool:bash]".
+var toolArgSuffix = regexp.MustCompile(`(?m)^(\[(?:tool|tool_use):[^\]]+\]|\[call [^\]]+\]) .*$`)
+
+// trimText prepares a message for the search index. Transcripts render from the
+// adapter's Fetch, so this affects search only.
+//
+// The tool-call argument is dropped here while staying visible in a rendered
+// transcript. Indexing it is actively harmful: measured against the sessions
+// agents actually went on to read, indexing command text collapsed rank@1 from
+// 10 to 1 and halved MRR, because a shell command shares enough vocabulary with
+// an unrelated query to win the AND pass and crowd out the right session.
+// Only the argument is stripped, never the marker itself — 13% of messages are
+// nothing but a marker, and removing those entirely drops them from the index.
 func trimText(s string) string {
+	s = toolArgSuffix.ReplaceAllString(s, "$1")
 	s = strings.TrimSpace(s)
 	if len(s) > excerptMax {
 		s = s[:excerptMax]
@@ -557,6 +712,24 @@ func (ix *Index) searchMatch(ftsQuery string, opts SearchOpts) ([]Hit, error) {
 	}
 	titleArgs = append(titleArgs, args[1:len(args)-1]...)
 
+	// A title match says "this session is relevant". Scoped to one session that
+	// is already known, so the row is pure noise: it occupies a hit slot and, with
+	// --context, an expansion budget, while pointing at no message (idx -1).
+	titleUnion := `
+  UNION ALL
+  SELECT s.id, s.source, s.source_id,
+         COALESCE(s.project,''), COALESCE(s.title,''),
+         COALESCE(s.started_at,0),
+         -1 AS idx, 'title' AS role,
+         '['||snippet(sessions_fts, 1, '«', '»', '…', 12)||']' AS snippet,
+         bm25(sessions_fts) * 1.4 AS rank   -- title hits get a small boost
+    FROM sessions_fts JOIN sessions s ON s.id = sessions_fts.session_pk
+   WHERE ` + strings.Join(titleWhere, " AND ")
+	if opts.SessionID != "" {
+		titleUnion = ""
+		titleArgs = nil
+	}
+
 	q := `
 SELECT id, source, source_id, project, title, started_at, idx, role, snippet, rank FROM (
   SELECT s.id AS id, s.source AS source, s.source_id AS source_id,
@@ -566,16 +739,7 @@ SELECT id, source, source_id, project, title, started_at, idx, role, snippet, ra
          snippet(messages_fts, 3, '«', '»', '…', 12) AS snippet,
          bm25(messages_fts) AS rank
     FROM messages_fts f JOIN sessions s ON s.id = f.session_pk
-   WHERE ` + strings.Join(bodyWhere, " AND ") + `
-  UNION ALL
-  SELECT s.id, s.source, s.source_id,
-         COALESCE(s.project,''), COALESCE(s.title,''),
-         COALESCE(s.started_at,0),
-         -1 AS idx, 'title' AS role,
-         '['||snippet(sessions_fts, 1, '«', '»', '…', 12)||']' AS snippet,
-         bm25(sessions_fts) * 1.4 AS rank   -- title hits get a small boost
-    FROM sessions_fts JOIN sessions s ON s.id = sessions_fts.session_pk
-   WHERE ` + strings.Join(titleWhere, " AND ") + `
+   WHERE ` + strings.Join(bodyWhere, " AND ") + titleUnion + `
 )
 ORDER BY (rank * 1.0) - (started_at / 1.0e13) ASC
 LIMIT ?`
@@ -598,13 +762,21 @@ LIMIT ?`
 			&h.StartedAt, &h.MsgIdx, &h.Role, &h.Snippet, &h.Rank); err != nil {
 			return nil, err
 		}
-		if prev, ok := seen[h.SessionID]; ok {
+		// Collapsing to one hit per session is right when ranking sessions against
+		// each other. Inside a single session it is wrong: the caller has already
+		// chosen the session and is asking *where* in it — every match is a distinct
+		// location, and reporting one of five leaves them guessing at the rest.
+		key := h.SessionID
+		if opts.SessionID != "" {
+			key = fmt.Sprintf("%s#%d", h.SessionID, h.MsgIdx)
+		}
+		if prev, ok := seen[key]; ok {
 			if h.Rank < hits[prev].Rank {
 				hits[prev] = h
 			}
 			continue
 		}
-		seen[h.SessionID] = len(hits)
+		seen[key] = len(hits)
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
@@ -1099,4 +1271,63 @@ func (ix *Index) AllTags() ([]TagCount, error) {
 func normalizeTag(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	return strings.Join(strings.Fields(s), "-")
+}
+
+// ForgetSession removes one session and its FTS rows. It is called only when an
+// adapter has *proved* the session is gone (its source is available, but the
+// session is not), so the index converges on the truth instead of accumulating
+// hits that error when an agent opens them. Tags are deliberately left alone:
+// they are durable user data keyed on the id, and the session may come back.
+func (ix *Index) ForgetSession(id string) error {
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM messages_fts WHERE session_pk = ?`,
+		`DELETE FROM sessions_fts WHERE session_pk = ?`,
+		`DELETE FROM sessions WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// PruneMissing removes sessions of one source that a completed full scan never
+// emitted — they exist in the index but no longer in the tool that wrote them.
+// Callers must only pass the result of a *clean, full* scan of an *available*
+// source; anything less and "not seen" means "not looked at", which would delete
+// a working index. Tags are left in place: they are user data keyed on the id.
+func (ix *Index) PruneMissing(source string, seen map[string]bool) (int, error) {
+	if len(seen) == 0 {
+		return 0, nil // a scan that emitted nothing proves nothing
+	}
+	rows, err := ix.db.Query(`SELECT source_id FROM sessions WHERE source = ?`, source)
+	if err != nil {
+		return 0, err
+	}
+	var gone []string
+	for rows.Next() {
+		var sid string
+		if err := rows.Scan(&sid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !seen[sid] {
+			gone = append(gone, sid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, sid := range gone {
+		if err := ix.ForgetSession(source + ":" + sid); err != nil {
+			return 0, err
+		}
+	}
+	return len(gone), nil
 }

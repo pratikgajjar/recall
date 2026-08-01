@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -193,9 +194,10 @@ type cursorAgentRecord struct {
 }
 
 type cursorAgentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-	Name string `json:"name"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // flattenCursorAgent joins a turn's parts: text verbatim, tool_use as
@@ -227,6 +229,10 @@ func flattenCursorAgent(parts []cursorAgentPart, role string) string {
 			b.WriteString("[tool_use:")
 			b.WriteString(p.Name)
 			b.WriteByte(']')
+			if a := argSummary(p.Input); a != "" {
+				b.WriteByte(' ')
+				b.WriteString(a)
+			}
 		}
 	}
 	return b.String()

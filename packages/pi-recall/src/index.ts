@@ -301,12 +301,24 @@ export default function recallExtension(pi: ExtensionAPI) {
   const searchSchema = Type.Object({
     query: Type.String({
       description:
-        "Full-text search over your past AI conversations (titles + message excerpts). Use concrete identifiers, error strings, or feature names.",
+        "Concrete identifiers, error strings or feature names work best.",
     }),
     repo: Type.Optional(Type.String({ description: REPO_HELP })),
     source: Type.Optional(Type.String({ description: SOURCE_HELP })),
     since: Type.Optional(Type.String({ description: SINCE_HELP })),
     tags: Type.Optional(Type.Array(Type.String(), { description: TAGS_HELP })),
+    session_id: Type.Optional(
+      Type.String({
+        description:
+          "Search within ONE session; '.' = the current session. ~10x cheaper than outlining it, and recovers what was said before a compaction.",
+      }),
+    ),
+    context: Type.Optional(
+      Type.Number({
+        description:
+          "Expand each hit with N messages either side (grep -C): find and read in one call. 5 for a detail, 10 for the whole exchange.",
+      }),
+    ),
     limit: Type.Optional(
       Type.Number({ description: `Max hits (default ${DEFAULT_SEARCH_LIMIT})` }),
     ),
@@ -316,24 +328,44 @@ export default function recallExtension(pi: ExtensionAPI) {
     name: "recall_search",
     label: "recall search",
     description:
-      "Search your own past AI chat history across Cursor, Claude Code, Codex, and pi. Returns ranked sessions with matched excerpts and a session id. Use recall_transcript to read a hit in full.",
+      "Search past AI chat history (Cursor, Claude Code, Codex, pi). Returns ranked hits with session_id + msg_idx. To find something inside one long session, pass session_id.",
     promptSnippet: "Search past AI conversations across tools",
     promptGuidelines: [
       "Use recall_search when the user references earlier work ('how did we fix…', 'what did I decide about…', 'continue the…') that may live in a prior chat.",
       "Pass repo: '.' to scope recall_search to the current project.",
-      "After recall_search, call recall_transcript with the returned id to read the full session before acting.",
+      "To find something inside a known session, pass session_id — do NOT outline it; searching the session is ~10x cheaper and returns the msg_idx directly.",
+      "Add context: 10 to read the surrounding messages in the same call instead of a follow-up recall_transcript (5 covers a detail, 10 the whole exchange).",
     ],
     parameters: searchSchema,
 
     async execute(_id, params, signal) {
-      const args = ["find", params.query, "--json", ...buildFilterArgs({
+      const filters = buildFilterArgs({
         repo: params.repo,
         source: params.source,
         since: params.since,
         tags: params.tags,
         limit: params.limit ?? DEFAULT_SEARCH_LIMIT,
-      })];
-      const res = await runRecall(args, signal);
+      });
+      const scope = params.session_id ? ["--in", params.session_id] : [];
+
+      // context renders the surrounding messages as text, so it cannot go
+      // through --json. This is the one-call "find it and show me" path.
+      if (params.context && params.context > 0) {
+        const res = await runRecall(
+          ["find", params.query, "--context", String(params.context), ...scope, ...filters],
+          signal,
+        );
+        if (!res.ok) throw new Error(res.stderr || `recall exited with code ${res.code}`);
+        return {
+          content: [{ type: "text", text: capTranscript(res.stdout.trim()) }],
+          details: { count: 1 },
+        };
+      }
+
+      const res = await runRecall(
+        ["find", params.query, "--json", ...scope, ...filters],
+        signal,
+      );
       if (!res.ok) throw new Error(res.stderr || `recall exited with code ${res.code}`);
       const hits = parseHits(res.stdout);
       return {
@@ -364,7 +396,7 @@ export default function recallExtension(pi: ExtensionAPI) {
     session_id: Type.Optional(
       Type.String({
         description:
-          "Session id from recall_search/recall_sessions (e.g. 'cursor:…', 'pi:…'). Omit to fetch the most recent session matching the filters below.",
+          "From recall_search. Omit for the most recent session.",
       }),
     ),
     repo: Type.Optional(Type.String({ description: REPO_HELP })),
@@ -373,44 +405,36 @@ export default function recallExtension(pi: ExtensionAPI) {
     range: Type.Optional(
       Type.String({
         description:
-          "Python-style slice over the message list. ':100' = first 100, '-50:' = last 50, '305:315' = window around a recall_search hit (msg_idx). Negative indices count from the end.",
+          "Python slice: ':100', '-50:', '305:315'.",
       }),
     ),
     outline: Type.Optional(
       Type.Boolean({
         description:
-          "One line per message ([N] role: first-line). Use to navigate a large session before slicing in with 'range'.",
+          "Survey an unknown session: one line per turn, tool runs collapsed, bounded. To find a known topic prefer recall_search with session_id.",
       }),
     ),
     role: Type.Optional(
       Type.String({
         description:
-          "Comma-separated roles to keep: 'user', 'assistant', 'tool'. Tool-related roles (toolResult, toolCall, function_call, etc.) collapse to 'tool'. Use 'user,assistant' to skip tool noise (~50% of long agent loops are tool messages).",
+          "Roles to keep: user|assistant|tool. 'user,assistant' skips tool noise.",
       }),
     ),
   });
 
-  // Above this many messages, recall_transcript called without 'range' or
-  // 'outline' returns the outline instead of the full body — protects the
-  // agent from accidentally pulling a 25 MB transcript into context.
-  const BIG_SESSION_THRESHOLD = 200;
 
-  function parseMsgCount(outlineStdout: string): number {
-    const m = outlineStdout.match(/msgs=(\d+)\s+\(outline\)/);
-    return m ? Number.parseInt(m[1], 10) : 0;
-  }
 
   pi.registerTool({
     name: "recall_transcript",
     label: "recall transcript",
     description:
-      "Read a past AI session as a transcript. Pass a session_id from recall_search, or omit it to get the most recent session (optionally filtered by repo/source/since). Large sessions: use 'outline' to navigate, then 'range' to slice. After a recall_search hit at msg_idx=N, prefer range='N-5:N+5' over the full session.",
+      "Read a past session. Looking for something specific? Use recall_search with session_id instead (~10x cheaper); outline only to survey an unknown session. Slice with range, drop tool noise with role.",
     promptSnippet: "Read a past AI session transcript",
     promptGuidelines: [
-      "Call recall_transcript after recall_search to read a specific session before reusing its decisions.",
+      "Reading a specific span is fine; hunting for a topic is not — use recall_search with session_id for that.",
       "Omit session_id with repo: '.' to pull the most recent conversation in this project.",
-      "After a recall_search hit at msg_idx=N, call recall_transcript with range='N-5:N+5' to read around it instead of dumping the whole session.",
-      "For an unfamiliar large session, call with outline=true first — it returns one line per message so you can pick a range to drill into.",
+      "After a hit at msg_idx=N, call range='N-5:N+5' rather than dumping the session.",
+      "outline=true only for a session you know nothing about.",
     ],
     parameters: transcriptSchema,
 
@@ -438,23 +462,10 @@ export default function recallExtension(pi: ExtensionAPI) {
         };
       }
 
-      // No slice asked for: peek at the outline first to size the session.
-      // ~ms; lets us auto-protect the agent's context on huge transcripts.
-      const peek = await runRecall([...cmd, "--outline"], signal);
-      if (!peek.ok) {
-        const msg = peek.stderr || peek.stdout.trim() || `recall exited with code ${peek.code}`;
-        return { content: [{ type: "text", text: msg }], details: { found: false }, isError: true };
-      }
-      const msgCount = parseMsgCount(peek.stdout);
-      if (msgCount > BIG_SESSION_THRESHOLD) {
-        const note =
-          `// session has ${msgCount} messages; defaulting to outline. Call recall_transcript again with range='FROM:TO' (e.g. range='-50:') to read a slice.\n\n`;
-        return {
-          content: [{ type: "text", text: capTranscript(note + peek.stdout.trim()) }],
-          details: { found: true },
-        };
-      }
-      // Small session — the full transcript is safe.
+      // No slice asked for: let the binary decide. applyBigSessionCap lives in
+      // the shared transcript path, so `show` already degrades a huge session to
+      // an outline and says so. Peeking with a second --outline subprocess here
+      // duplicated that logic (and its threshold, free to drift) for no gain.
       const res = await runRecall(cmd, signal);
       if (!res.ok) {
         const msg = res.stderr || res.stdout.trim() || `recall exited with code ${res.code}`;

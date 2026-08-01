@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -189,7 +190,7 @@ func (a *PiAdapter) parse(ctx context.Context, path string, startOffset int64, s
 			if truncate && len(text) > excerptMax {
 				text = text[:excerptMax]
 			}
-			res.msgs = append(res.msgs, Message{SourceID: res.sessID, Idx: idx, Role: ev.Message.Role, TS: ts, Text: text})
+			res.msgs = append(res.msgs, Message{SourceID: res.sessID, Idx: idx, Role: ev.Message.qualifiedRole(), TS: ts, Text: text})
 			idx++
 		}
 		return nil
@@ -218,6 +219,24 @@ type PiMessage struct {
 	Model   string        `json:"model"`
 	Content PiMessageBody `json:"content"`
 	Usage   *PiUsage      `json:"usage"`
+	// pi names the tool behind every result and flags failures. Both were being
+	// dropped, leaving a reader to match results to calls by position.
+	ToolName string `json:"toolName"`
+	IsError  bool   `json:"isError"`
+}
+
+// qualifiedRole tags a tool result with the tool that produced it, and marks
+// failures. canonicalRole still sees "tool" in the prefix, so role filtering is
+// unaffected.
+func (m PiMessage) qualifiedRole() string {
+	if m.ToolName == "" {
+		return m.Role
+	}
+	name := m.ToolName
+	if m.IsError {
+		name += "!err"
+	}
+	return m.Role + ":" + name
 }
 
 // PiUsage is the real per-assistant-message accounting pi writes to the
@@ -253,10 +272,11 @@ func (b *PiMessageBody) UnmarshalJSON(data []byte) error {
 }
 
 type PiPart struct {
-	Type    string       `json:"type"`
-	Text    string       `json:"text"`
-	Name    string       `json:"name"`
-	Content PiToolResult `json:"content"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Name      string          `json:"name"`
+	Content   PiToolResult    `json:"content"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 type PiToolResult struct {
@@ -306,6 +326,10 @@ func (m PiMessage) Text() string {
 			b.WriteString("[tool:")
 			b.WriteString(p.Name)
 			b.WriteByte(']')
+			if a := argSummary(p.Arguments); a != "" {
+				b.WriteByte(' ')
+				b.WriteString(a)
+			}
 		case "toolResult":
 			if s := p.Content.str; s != "" {
 				if len(s) > 400 {

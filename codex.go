@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -129,6 +130,7 @@ func (a *CodexAdapter) parse(ctx context.Context, path string, startOffset int64
 		}
 	}
 	idx := startIdx
+	callNames := map[string]string{} // call_id -> tool name, for attributing outputs
 	consumed, err := scanLines(ctx, fh, func(line []byte) error {
 		var ev CodexEvent
 		if JSONUnmarshal(line, &ev) != nil {
@@ -161,7 +163,7 @@ func (a *CodexAdapter) parse(ctx context.Context, path string, startOffset int64
 				res.usage.CacheRead = tu.CachedInputTokens
 			}
 		case "response_item":
-			role, text := ev.Payload.flatten()
+			role, text := ev.Payload.flatten(callNames)
 			if text == "" {
 				return nil
 			}
@@ -203,14 +205,15 @@ type CodexPayload struct {
 	ID  string `json:"id"`
 	CWD string `json:"cwd"`
 
-	Model string          `json:"model"` // on type=turn_context
-	Info  CodexUsageInfo  `json:"info"`  // on type=event_msg (token_count)
+	Model string         `json:"model"` // on type=turn_context
+	Info  CodexUsageInfo `json:"info"`  // on type=event_msg (token_count)
 
 	ItemType  string       `json:"type"`
 	Role      string       `json:"role"`
 	Content   []CodexPart  `json:"content"`
 	Name      string       `json:"name"`
 	Arguments string       `json:"arguments"`
+	CallID    string       `json:"call_id"` // links a call to its output
 	Output    CodexCallOut `json:"output"`
 	Summary   codexParts   `json:"summary"`
 
@@ -273,7 +276,11 @@ func (o *CodexCallOut) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (p CodexPayload) flatten() (role, text string) {
+// flatten renders one payload. callNames maps a call_id to the tool that was
+// invoked, so a result can be attributed the way pi's already is: codex records
+// the link but the transcript was throwing it away, leaving "## 7 tool" with no
+// indication of which tool produced the output below it.
+func (p CodexPayload) flatten(callNames map[string]string) (role, text string) {
 	switch p.ItemType {
 	case "message":
 		var b strings.Builder
@@ -288,17 +295,33 @@ func (p CodexPayload) flatten() (role, text string) {
 		}
 		return p.Role, b.String()
 	case "function_call":
+		// Was 400 characters of raw JSON per call, which buries the one field that
+		// identifies the call. Same clipped summary every other adapter uses.
+		if p.CallID != "" && p.Name != "" && callNames != nil {
+			callNames[p.CallID] = p.Name
+		}
+		// The role names the tool, so repeating it in the body is the same
+		// redundancy the message header used to carry.
+		if a := argSummary(json.RawMessage(p.Arguments)); a != "" {
+			return "tool:" + p.Name, a
+		}
 		args := p.Arguments
 		if len(args) > 400 {
 			args = args[:400]
 		}
-		return "tool", "[call " + p.Name + "] " + args
+		return "tool:" + p.Name, args
 	case "function_call_output":
 		s := p.Output.Content
 		if len(s) > 400 {
 			s = s[:400]
 		}
-		return "tool", "[output] " + s
+		// The "[output] " prefix said what the role already says; naming the tool
+		// in the role is both shorter and more informative.
+		role = "tool"
+		if n := callNames[p.CallID]; n != "" {
+			role = "tool:" + n
+		}
+		return role, s
 	case "reasoning":
 		var b strings.Builder
 		for _, part := range p.Summary {

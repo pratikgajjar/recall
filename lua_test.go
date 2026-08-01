@@ -738,3 +738,76 @@ func TestBrokenPluginContained(t *testing.T) {
 		t.Fatalf("erroring transform should yield no sessions, got %d", len(sessions))
 	}
 }
+
+// The Lua plugins are the documented extension surface, so they must render a
+// tool call exactly as the built-in adapters do — including the clipped
+// argument. This pins the agreement on a call that HAS an argument, which the
+// existing parity fixtures happened not to cover.
+func TestLuaParityToolArguments(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "-work-app", "20260503T080000_sess-args.jsonl")
+	writeLines(t, path,
+		`{"type":"session","id":"sess-args","cwd":"/work/app","timestamp":"2026-05-03T08:00:00Z"}`,
+		`{"type":"message","timestamp":"2026-05-03T08:00:02Z","message":{"role":"user","content":"check the log"}}`,
+		`{"type":"message","timestamp":"2026-05-03T08:00:03Z","message":{"role":"assistant","content":[`+
+			`{"type":"text","text":"Looking."},`+
+			`{"type":"toolCall","name":"bash","arguments":{"command":"git log --oneline -5"}}]}}`,
+	)
+	assertParity(t, "pi", &PiAdapter{Root: root}, luaAdapterFor(t, "plugins/pi.lua", root))
+
+	// And the argument must actually be rendered, not silently dropped by both.
+	_, msgs, _, err := (&PiAdapter{Root: root}).Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "[tool:bash] git log --oneline -5") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("tool argument missing from rendered text: %+v", msgs)
+	}
+}
+
+// Claude Code carries {id,name,input} on a tool_use and {tool_use_id} on the
+// matching tool_result. Both were discarded, so a claude transcript showed
+// neither what a tool was asked to do nor which tool produced a result. This
+// machine has 3 claude sessions and none contain a tool call, so the shape is
+// pinned by fixture instead of by corpus.
+func TestClaudeToolCallsAreAttributed(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "-work-app", "sess-claude-tools.jsonl")
+	writeLines(t, path,
+		`{"type":"user","cwd":"/work/app","timestamp":"2026-05-03T08:00:00Z","message":{"role":"user","content":"check the log"}}`,
+		`{"type":"assistant","timestamp":"2026-05-03T08:00:02Z","message":{"role":"assistant","content":[`+
+			`{"type":"text","text":"Looking."},`+
+			`{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git log --oneline -5"}}]}}`,
+		`{"type":"user","timestamp":"2026-05-03T08:00:03Z","message":{"role":"user","content":[`+
+			`{"type":"tool_result","tool_use_id":"toolu_1","content":"abc123 fix the thing"}]}}`,
+	)
+	_, msgs, _, err := (&ClaudeAdapter{Root: root}).Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawArg, sawAttribution bool
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "[tool_use:Bash] git log --oneline -5") {
+			sawArg = true
+		}
+		if strings.HasPrefix(m.Role, "toolResult:Bash") {
+			sawAttribution = true
+			if canonicalRole(m.Role) != "tool" {
+				t.Errorf("qualified role must still filter as tool, got %q", m.Role)
+			}
+		}
+	}
+	if !sawArg {
+		t.Errorf("tool argument not rendered: %+v", msgs)
+	}
+	if !sawAttribution {
+		t.Errorf("tool_result not attributed to its tool_use: %+v", msgs)
+	}
+	assertParity(t, "claude", &ClaudeAdapter{Root: root}, luaAdapterFor(t, "plugins/claude.lua", root))
+}

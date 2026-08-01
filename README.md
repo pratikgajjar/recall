@@ -65,9 +65,10 @@ Pure Go, no CGO. Builds a single static binary.
 
 `recall mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server over stdio, so any MCP-capable harness can search your past chats. It
-exposes `recall_search`, `recall_transcript`, `recall_sessions`, `recall_related`,
-and `recall_tag`/`recall_untag`/`recall_tags`, and keeps the index warm in the
-background.
+exposes `recall_search`, `recall_transcript`, `recall_sessions`, `recall_related`
+and `recall_tag` (`action: add|remove|list`), and keeps the index warm in the
+background. The tool schema is deliberately terse — it is re-sent on every
+agent turn, so prose there is a recurring cost.
 
 **Claude Code**
 
@@ -106,6 +107,10 @@ npx skills add pratikgajjar/recall          # via the skills CLI (skills.sh)
 # or manually:  cp -r skills/recall ~/.claude/skills/recall
 ```
 
+The skill is also embedded in the binary. `recall doctor` flags installed copies
+that have fallen behind it, and `recall skill install` refreshes them — a stale
+skill keeps recommending the expensive path long after the binary stopped.
+
 Once connected, ask the agent things like _"use recall to find how we fixed the
 import cycle"_ and it will search and read the relevant past session.
 
@@ -127,7 +132,8 @@ recall tag                         list all tags + counts (git-tag style)
 recall tag <session-id> <tag>…     attach durable tags (survive reindex)
 recall tag -d <session-id> <tag>…  remove tags
 recall stats [flags]               sessions/messages/tokens/cost by source, project, model
-recall index [--full]              (re)build the index from all sources
+recall index [--full] [--prune]    (re)build the index; --prune drops sessions
+                                   whose source was deleted (needs --full)
 recall mcp                         run an MCP server (Claude Code, Codex, Cursor, …)
 recall plugin list                 show bundled + installed Lua plugins
 recall plugin install <name>       install a bundled plugin into ~/.recall/plugins
@@ -145,6 +151,8 @@ Flags can appear anywhere on the line:
 --tag SELECTOR   filter, repeatable (AND). A user tag, or a reserved facet:
                  source:cursor|claude|codex|pi
 --json           machine-readable output
+--context N      print N messages around each hit (like grep -C), so a search
+                 answers "find it and show me" without a follow-up `show`
 ```
 
 `stats` also takes `--projects N` / `--models N` (rows per table, `0` = all)
@@ -182,8 +190,8 @@ project, and model:
 $ recall stats --projects 2 --models 4
 SOURCE  SESSIONS  MESSAGES  TOKENS  COST        PROJECT
 pi      686       313807    31.3B   $17190.19   (all)
-        20        69379     5.7B    $2701.57      ~/code/txn-store
-        187       68149     6.7B    $2273.09      ~/code/vegapunk-go
+        20        69379     5.7B    $2701.57      ~/code/ledger
+        187       68149     6.7B    $2273.09      ~/code/api-server
                                                   … 73 more (--projects 0)
 codex   1088      37493     771.4M  -           (all)
 

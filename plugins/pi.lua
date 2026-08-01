@@ -2,6 +2,23 @@
 -- Pure transform; reproduces the built-in Go adapter (see lua_test.go).
 
 -- pi content is a string or an array of typed parts (text/toolCall/toolResult).
+-- arg_summary picks the field that identifies what a call did and clips it, so
+-- a transcript shows "[tool:bash] git log" rather than a bare marker. Mirrors
+-- argSummary in transcript.go; lua_test.go asserts the two agree.
+local ARG_KEYS = { "command", "path", "query", "pattern", "file_path" }
+local function arg_summary(input)
+  if type(input) ~= "table" then return nil end
+  for _, k in ipairs(ARG_KEYS) do
+    local v = input[k]
+    if type(v) == "string" and v ~= "" then
+      v = v:gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
+      if #v > 70 then v = v:sub(1, 70) .. "\u{2026}" end
+      return v
+    end
+  end
+  return nil
+end
+
 local function flatten(c)
   if type(c) == "string" then return c end
   if type(c) ~= "table" then return "" end
@@ -10,7 +27,10 @@ local function flatten(c)
     if p.type == "text" and p.text and p.text ~= "" then
       out[#out + 1] = p.text
     elseif p.type == "toolCall" and p.name and p.name ~= "" then
-      out[#out + 1] = "[tool:" .. p.name .. "]"
+      local __m = "[tool:" .. p.name .. "]"
+      local __a = arg_summary(p.arguments)
+      if __a then __m = __m .. " " .. __a end
+      out[#out + 1] = __m
     elseif p.type == "toolResult" then
       local c2 = p.content
       if type(c2) == "string" and c2 ~= "" then

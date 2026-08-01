@@ -36,12 +36,11 @@ pi -e ./packages/pi-recall/src/index.ts
 
 | Tool | What it does |
 | --- | --- |
-| `recall_search` | Full-text search over past sessions. Returns ranked hits with matched excerpts and a session id. |
-| `recall_transcript` | Read a session in full — by `session_id`, or omit it for the most recent session (filterable by repo/source/since). |
+| `recall_search` | Full-text search over past sessions. Returns ranked hits with `session_id` + `msg_idx`. Pass `session_id` to search *inside* one session; add `context` to read the surrounding messages in the same call. |
+| `recall_transcript` | Read a session — by `session_id`, or omit it for the most recent (filterable by repo/source/since). |
 | `recall_sessions` | List recent sessions (titles + ids, no bodies). |
 | `recall_related` | Given a session id, find other sessions on the same topic. |
-| `recall_tag` / `recall_untag` | Attach/remove durable tags on a session — bookmark sessions worth remembering. Tags survive index rebuilds. |
-| `recall_tags` | List all tags (with counts), or the tags on one session. |
+| `recall_tag` | Durable bookmarks: `action: add` (default) \| `remove` \| `list`. Tags survive index rebuilds. |
 
 All search/list tools accept `repo` (pass `"."` for the current project),
 `source` (`cursor` \| `claude` \| `codex` \| `pi`), `since` (e.g. `7d`), and
@@ -51,13 +50,26 @@ equivalent to `source: "cursor"`.
 
 ### Navigating large sessions
 
-Some sessions are huge (thousands of messages). `recall_transcript` takes
-three extra params to slice instead of dumping everything:
+Some sessions are huge (thousands of messages). **To find a known topic inside
+one, search it — do not outline it:**
+
+```jsonc
+recall_search { query: "connection pool timeout", session_id: "pi:019f…", context: 5 }
+```
+
+That is one call. Measured over real navigations: searching inside a session
+costs ~400 characters against ~4,000 to outline it, and `context` removes the
+follow-up `recall_transcript` entirely. `session_id: "."` scopes to the current
+session — how you recover something said before a compaction.
+
+Outline is for a session you know *nothing* about. `recall_transcript` takes
+three params to slice instead of dumping everything:
 
 - `range` — Python-style slice over the message list: `":100"` first 100,
   `"-50:"` last 50, `"305:315"` window. Negative indices count from the end.
-- `outline` — one line per message: `[N] role: first-line`. A cheap table of
-  contents you can scan before slicing in.
+- `outline` — a table of contents: one line per turn, with runs of tool
+  activity collapsed to `[12-38] tool ×27 (4.2k chars: bash×19, read×8)`. Long
+  sessions degrade to chapter markers (the user's turns) to stay bounded.
 - `role` — comma-separated allowlist: `"user,assistant"` (skip tool noise),
   `"user"` (just the prompts), `"tool"`. Tool-related labels (`toolResult`,
   `toolCall`, `function_call`, …) all collapse to `tool`. In long agent loops,
@@ -65,11 +77,11 @@ three extra params to slice instead of dumping everything:
   ~600 with `role="user"`.
 
 Every rendered message carries its own `## msg N/TOTAL role` header so any
-slice is self-locating. **Default-cap:** if a session has more than 200
-messages and you ask for neither `range` nor `outline`, the tool returns the
-outline (plus a one-line note explaining how to drill in) instead of a
-context-blowing wall of text. After a `recall_search` hit at `msg_idx=N`,
-prefer `range: "N-5:N+5"` over reading the whole session.
+slice is self-locating. Output is bounded by default and always says how to get
+the rest: sessions over 200 messages return the outline, a read over ~20k chars
+stops with a `Continue with range='X:Y'`, and tool results are clipped at 600
+chars with an elision marker (`tool_chars: 0` to opt out). After a hit at
+`msg_idx=N`, `range: "N-5:N+5"`.
 
 ### Recommended agent prompt
 

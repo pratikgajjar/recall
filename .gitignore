@@ -1,13 +1,41 @@
+# Build output
 /recall
 /bin/
 /dist/
-*.test
-.DS_Store
 /bubblebench
+*.test
+*.out
+coverage.*
 
-# node / pi extension
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Node / pi extension
 node_modules/
 *.tsbuildinfo
-
-# pi-recall: per-platform binaries assembled at publish time
+# per-platform binaries assembled at publish time
 packages/pi-recall/bin/
+
+# Python bytecode from the autoresearch scripts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# The benchmark workload is every recall call this machine's agents actually
+# made — real queries carrying ticket ids and service names. This repo is
+# public, so it is never committed. Regenerate it with:
+#   autoresearch/extract_workload.py
+autoresearch/agent_workload.json
+
+# Scratch indexes used by the benchmarks (see RECALL_INDEX)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# The deny-list names your own projects — never publish it.
+autoresearch/private-names.txt

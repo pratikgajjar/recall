@@ -53,7 +53,8 @@ USAGE
   recall stats [flags]             session/message counts by source/project
   recall index [--full]            (re)build the local index from all sources
   recall mcp                       run an MCP server (Claude Code, Codex, Cursor, …)
-  recall doctor                    health check + source detection
+  recall doctor                    health check
+  recall skill install             refresh installed agent skill copies + source detection
   recall version
 
 FLAGS
@@ -101,6 +102,10 @@ func main() {
 		}
 	case "doctor":
 		if err := runDoctor(args); err != nil {
+			fatal(err)
+		}
+	case "skill":
+		if err := runSkill(args); err != nil {
 			fatal(err)
 		}
 	case "find":
@@ -529,8 +534,14 @@ func listTags(pos []string, asJSON bool) error {
 func runIndex(args []string) error {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	full := fs.Bool("full", false, "ignore checkpoints and reindex everything")
+	prune := fs.Bool("prune", false, "with --full: drop indexed sessions whose source is gone\n\t(deleted from the tool that wrote them)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *prune && !*full {
+		// Without --full the scan skips unchanged files, so "not seen" would mean
+		// "not modified" and pruning would delete most of the index.
+		return errors.New("--prune requires --full")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -575,7 +586,15 @@ func runIndex(args []string) error {
 		// emit ingests a batch and commits the checkpoint that's valid as of
 		// that batch, so progress is durable and resumable mid-provider.
 		var nSess, nMsg int
+		// A full scan visits every session the source still holds, so anything in
+		// the index that it never emits is provably gone.
+		seen := map[string]bool{}
 		emit := func(sessions []Session, msgs []Message, ckpt string) error {
+			if *prune {
+				for _, s := range sessions {
+					seen[s.SourceID] = true
+				}
+			}
 			if err := ix.IngestBatch(ctx, ad.ID(), sessions, msgs); err != nil {
 				return err
 			}
@@ -609,8 +628,22 @@ func runIndex(args []string) error {
 			continue
 		}
 		grand += nSess
-		fmt.Printf("\r\033[K  %-7s %6d sessions  %7d messages  %s\n",
-			ad.ID(), nSess, nMsg, time.Since(t0).Round(time.Millisecond))
+		pruned := 0
+		if *prune {
+			// Only after a clean scan of an available source: a partial or failed
+			// pass must never be read as "everything was deleted".
+			n, err := ix.PruneMissing(ad.ID(), seen)
+			if err != nil {
+				fmt.Printf("\r\033[K  %-7s prune failed: %v\n", ad.ID(), err)
+			}
+			pruned = n
+		}
+		suffix := ""
+		if pruned > 0 {
+			suffix = fmt.Sprintf("  (pruned %d gone)", pruned)
+		}
+		fmt.Printf("\r\033[K  %-7s %6d sessions  %7d messages  %s%s\n",
+			ad.ID(), nSess, nMsg, time.Since(t0).Round(time.Millisecond), suffix)
 	}
 	if ctx.Err() != nil {
 		ix.BulkMode(false, false)
@@ -685,6 +718,23 @@ func runDoctor(_ []string) error {
 		}
 	}
 	fmt.Printf("  total   %d sessions\n", total)
+
+	// Installed skill copies are what actually steer an agent, and they are
+	// plain files that no upgrade touches. A stale one keeps recommending the
+	// expensive path long after the binary stopped.
+	var stale []string
+	for _, s := range installedSkills() {
+		if s.present && s.stale {
+			stale = append(stale, s.dir)
+		}
+	}
+	if len(stale) > 0 {
+		fmt.Printf("\nskill: %d installed copy(ies) out of date with this binary\n", len(stale))
+		for _, d := range stale {
+			fmt.Printf("  ! %s\n", d)
+		}
+		fmt.Println("  fix: recall skill install")
+	}
 	return nil
 }
 
@@ -747,9 +797,14 @@ func runFind(args []string) error {
 	fs := flag.NewFlagSet("find", flag.ExitOnError)
 	var cf commonFlags
 	cf.register(fs)
+	context_ := fs.Int("context", 0, "also print N messages around each hit (like grep -C),\n\tsaving the follow-up `show --range` call")
 	flagArgs, posArgs := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
+	}
+	if cf.json && *context_ > 0 {
+		// Silently dropping a flag the caller asked for is how --in shipped broken.
+		return errors.New("--context renders text; drop --json (or drop --context)")
 	}
 	query := strings.Join(posArgs, " ")
 	opts, err := cf.toSearchOpts()
@@ -770,6 +825,9 @@ func runFind(args []string) error {
 	}
 	if cf.json {
 		return JSONNewEncoder(os.Stdout).Encode(hits)
+	}
+	if *context_ > 0 {
+		return printHitsWithContext(context.Background(), os.Stdout, ix, hits, *context_)
 	}
 	printHits(os.Stdout, hits)
 	printPager(os.Stdout, "find", query, cf, hits)
@@ -836,6 +894,26 @@ func printHits(w io.Writer, hits []Hit) {
 		fmt.Fprintln(w, "no matches")
 		return
 	}
+	// When every hit is from the same session — which is exactly what a
+	// session-scoped search returns — the date, source, project, title and a
+	// 45-character session id are identical on every line. State them once and
+	// let each hit be just its location and snippet.
+	if sid := loneSession(hits); sid != "" {
+		h0 := hits[0]
+		title := h0.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		fmt.Fprintf(w, "%s  %s  %s  %s\nid=%s  (%d hits)\n\n",
+			h0.StartedTime().Format("2006-01-02 15:04"), h0.Source,
+			shortProject(h0.Project), truncate(title, 60), sid, len(hits))
+		for _, h := range hits {
+			fmt.Fprintf(w, "  msg=%-6d %-10s %s\n", h.MsgIdx, h.Role,
+				strings.ReplaceAll(h.Snippet, "\n", " "))
+		}
+		fmt.Fprintln(w)
+		return
+	}
 	for _, h := range hits {
 		when := h.StartedTime().Format("2006-01-02 15:04")
 		proj := shortProject(h.Project)
@@ -850,6 +928,22 @@ func printHits(w io.Writer, hits []Hit) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// loneSession returns the shared session id when every hit came from the same
+// session, else "". Two hits is the point at which repeating the header costs
+// more than a shared one.
+func loneSession(hits []Hit) string {
+	if len(hits) < 2 {
+		return ""
+	}
+	id := hits[0].SessionID
+	for _, h := range hits[1:] {
+		if h.SessionID != id {
+			return ""
+		}
+	}
+	return id
 }
 
 func shortProject(p string) string {
@@ -876,6 +970,8 @@ func runLast(args []string) error {
 	rng := fs.String("range", "", "Python-style slice FROM:TO")
 	outline := fs.Bool("outline", false, "one line per message")
 	roles := fs.String("role", "", "comma-separated roles to keep: user,assistant,tool")
+	toolChars := fs.Int("tool-chars", defaultToolChars, "cap tool-result bodies at N chars (0 = uncapped)")
+	maxChars := fs.Int("max-chars", defaultMaxChars, "cap total transcript output, paging the rest (0 = uncapped)")
 	flagArgs, _ := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -899,7 +995,7 @@ func runLast(args []string) error {
 	if len(hits) == 0 {
 		return fmt.Errorf("no sessions found for %s", opts.Project)
 	}
-	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json, transcriptOpts{Range: *rng, Outline: *outline, Roles: *roles})
+	return printTranscript(context.Background(), ix, hits[0].SessionID, cf.json, transcriptOpts{Range: *rng, Outline: *outline, Roles: *roles, ToolChars: *toolChars, MaxChars: *maxChars})
 }
 
 func runShow(args []string) error {
@@ -908,6 +1004,8 @@ func runShow(args []string) error {
 	rng := fs.String("range", "", "Python-style slice FROM:TO (e.g. 100:200, :50, -10:)")
 	outline := fs.Bool("outline", false, "one line per message: [N] role: first-line")
 	roles := fs.String("role", "", "comma-separated roles to keep: user,assistant,tool")
+	toolChars := fs.Int("tool-chars", defaultToolChars, "cap tool-result bodies at N chars (0 = uncapped)")
+	maxChars := fs.Int("max-chars", defaultMaxChars, "cap total transcript output, paging the rest (0 = uncapped)")
 	flagArgs, posArgs := splitFlagsAndArgs(args, sharedBoolFlags)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -920,10 +1018,16 @@ func runShow(args []string) error {
 		return err
 	}
 	defer ix.Close()
-	return printTranscript(context.Background(), ix, posArgs[0], *asJSON, transcriptOpts{Range: *rng, Outline: *outline, Roles: *roles})
+	return printTranscript(context.Background(), ix, posArgs[0], *asJSON, transcriptOpts{Range: *rng, Outline: *outline, Roles: *roles, ToolChars: *toolChars, MaxChars: *maxChars})
 }
 
 func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool, opts transcriptOpts) error {
+	return printTranscriptTo(ctx, os.Stdout, ix, id, asJSON, opts)
+}
+
+// printTranscriptTo is the writer-taking form. MCP must never render to
+// os.Stdout — that stream carries JSON-RPC frames.
+func printTranscriptTo(ctx context.Context, w io.Writer, ix *Index, id string, asJSON bool, opts transcriptOpts) error {
 	s, err := ix.LookupSession(id)
 	if err != nil {
 		return fmt.Errorf("session %s: %w", id, err)
@@ -934,15 +1038,28 @@ func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool, opt
 	}
 	msgs, err := ad.Fetch(ctx, s.SourceID)
 	if err != nil {
+		// Read handles are query_only, so this path cannot prune. Point at the
+		// command that can: nothing else removes a session whose source file was
+		// deleted, so those rows stay searchable and cost a wasted read forever.
+		if ad.Available() && strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("%w (gone from %s; clear it with `recall index --full --prune`)", err, s.Source)
+		}
 		return err
 	}
 	if asJSON {
-		return JSONNewEncoder(os.Stdout).Encode(map[string]any{
+		return JSONNewEncoder(w).Encode(map[string]any{
 			"session":  s,
 			"messages": msgs,
 		})
 	}
-	return renderTranscript(os.Stdout, s, msgs, opts)
+	// Same guard MCP applies: an unsliced request against a huge session dumps
+	// megabytes nobody asked for. It lived only on the MCP path, so `recall show`
+	// and anything piping it stayed unprotected — apply it where both route through.
+	opts, prelude := applyBigSessionCap(opts, len(msgs))
+	if prelude != "" {
+		fmt.Fprint(w, prelude)
+	}
+	return renderTranscript(w, s, msgs, opts)
 }
 
 func adapterFor(source string) Adapter {

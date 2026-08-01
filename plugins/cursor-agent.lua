@@ -19,6 +19,23 @@ local function strip_user_wrappers(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- arg_summary picks the field that identifies what a call did and clips it, so
+-- a transcript shows "[tool:bash] git log" rather than a bare marker. Mirrors
+-- argSummary in transcript.go; lua_test.go asserts the two agree.
+local ARG_KEYS = { "command", "path", "query", "pattern", "file_path" }
+local function arg_summary(input)
+  if type(input) ~= "table" then return nil end
+  for _, k in ipairs(ARG_KEYS) do
+    local v = input[k]
+    if type(v) == "string" and v ~= "" then
+      v = v:gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
+      if #v > 70 then v = v:sub(1, 70) .. "\u{2026}" end
+      return v
+    end
+  end
+  return nil
+end
+
 local function flatten(content, role)
   if type(content) ~= "table" then return "" end
   local out = {}
@@ -27,7 +44,10 @@ local function flatten(content, role)
       local t = role == "user" and strip_user_wrappers(p.text) or p.text
       if t ~= "" then out[#out + 1] = t end
     elseif p.type == "tool_use" and p.name and p.name ~= "" then
-      out[#out + 1] = "[tool_use:" .. p.name .. "]"
+      local __m = "[tool_use:" .. p.name .. "]"
+      local __a = arg_summary(p.input)
+      if __a then __m = __m .. " " .. __a end
+      out[#out + 1] = __m
     end
   end
   return table.concat(out, "\n")

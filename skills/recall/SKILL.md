@@ -21,18 +21,46 @@ recall last --repo .                          # most recent session in THIS repo
 
 Each hit gives a `session_id` and a `msg` index at the matched message.
 
-## Big sessions: slice, don't dump
+## Big sessions: search inside them, don't page them
 
-Sessions can be 30k+ messages. `recall show <id>` takes:
+Sessions can be 30k+ messages. To find a **known topic** inside one, search the
+session — do not outline it:
 
 ```bash
---outline                 # [N] role: first-line — a table of contents
---range 305:315           # window (also :100, -50:); indices are absolute
---role user,assistant     # drop tool noise (often ~50% of an agent loop)
+recall find "connection pool timeout" --in cursor:94dc8775-… --context 10  # ONE call
 ```
 
-After a hit at `msg=N`, prefer `recall show <id> --range N-5:N+5`. For an
-unfamiliar session, start with `--outline --role user` — the prompts are its spine.
+`--context N` prints the surrounding messages with each hit, like `grep -C`, so
+"find it and show me" does not need a follow-up `show --range`. Measured against
+what agents historically went on to read: `5` covers ~59% of it (~4k chars),
+`10` covers ~100% whenever the search landed in the right place (~7.5k). Use 5
+to check a detail, 10 to read the exchange. Without it:
+
+```bash
+recall find "connection pool timeout" --in cursor:94dc8775-…   # ~400 chars, gives msg=N
+recall show cursor:94dc8775-… --range N-5:N+5            # read just that window
+```
+
+Measured over real navigations in this repo's own history: searching inside a
+session costs ~400 characters against ~4,000 to outline it — about 10x less for
+the same landing spot. `--in .` scopes to the current session, which is how you
+recover something said before a compaction.
+
+Outline is for a session you know **nothing** about:
+
+```bash
+--outline                 # table of contents; tool runs collapse to one line
+--range 305:315           # window (also :100, -50:); indices are absolute
+--role user,assistant     # drop tool noise (often ~50% of an agent loop)
+--tool-chars 0            # un-clip tool output (default clips at 600 chars)
+--max-chars 0             # un-cap the read (default pages at 20k chars)
+```
+
+Output is bounded by default, and always tells you how to get the rest: a long
+outline degrades to user turns + tool runs, oversized reads stop with a
+`Continue with range='X:Y'`, and long tool results end in an elision marker.
+Asking for `--range 0:500` is not a shortcut — it is half a session (~170k
+characters) and you will get the first page of it.
 
 ## Tags: durable bookmarks (git-tag style)
 

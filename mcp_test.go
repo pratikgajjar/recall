@@ -126,3 +126,78 @@ func TestMCPUnknownMethod(t *testing.T) {
 		t.Errorf("error code = %v, want -32601", e["code"])
 	}
 }
+
+// The MCP tool schema is re-sent on every agent turn, so it is recurring
+// overhead — but it also carries the steer that keeps agents off the expensive
+// path. Bound the size AND pin the guidance, so trimming can never silently
+// delete the thing that saves the tokens.
+func TestToolSchemaStaysLeanAndKeepsSteering(t *testing.T) {
+	tools := mcpTools()
+	blob, err := json.Marshal(tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const budget = 5500
+	if len(blob) > budget {
+		t.Errorf("tool schema %d chars exceeds %d; it is paid on every turn", len(blob), budget)
+	}
+	s := string(blob)
+	// The behavioural steer earns its bytes back many times over.
+	for _, must := range []string{"session_id", "recall_search with session_id", "grep -C"} {
+		if !strings.Contains(s, must) {
+			t.Errorf("schema lost load-bearing guidance %q", must)
+		}
+	}
+	// Every tool still has to say what it does and what it takes.
+	for _, tl := range tools {
+		m := tl
+		if m["description"] == nil || m["description"] == "" {
+			t.Errorf("tool %v has no description", m["name"])
+		}
+		if m["inputSchema"] == nil {
+			t.Errorf("tool %v has no inputSchema", m["name"])
+		}
+	}
+}
+
+// recall_tag is one verb with a mode, like the CLI. Three MCP tools for one
+// concept cost 27% of a schema that is re-sent every turn, for a feature that
+// was never called once. All three modes must still work.
+func TestTagToolActions(t *testing.T) {
+	ix := newTestIndex(t)
+	if err := ix.IngestBatch(context.Background(), "pi",
+		[]Session{{Source: "pi", SourceID: "s1", Title: "t", MsgCount: 1}},
+		[]Message{{SourceID: "s1", Idx: 0, Role: "user", Text: "hello"}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := &mcpServer{ix: ix}
+	ctx := context.Background()
+
+	if _, err := srv.runTool(ctx, "recall_tag", toolArgs{SessionID: "pi:s1", Tags: []string{"alpha"}}); err != nil {
+		t.Fatalf("add (implicit): %v", err)
+	}
+	got, err := srv.runTool(ctx, "recall_tag", toolArgs{Action: "list", SessionID: "pi:s1"})
+	if err != nil || !strings.Contains(got, "alpha") {
+		t.Fatalf("list one session = %q, %v", got, err)
+	}
+	all, err := srv.runTool(ctx, "recall_tag", toolArgs{Action: "list"})
+	if err != nil || !strings.Contains(all, "alpha") {
+		t.Fatalf("list all = %q, %v", all, err)
+	}
+	if _, err := srv.runTool(ctx, "recall_tag", toolArgs{Action: "remove", SessionID: "pi:s1", Tags: []string{"alpha"}}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	after, err := srv.runTool(ctx, "recall_tag", toolArgs{Action: "list", SessionID: "pi:s1"})
+	if err != nil || strings.Contains(after, "alpha") {
+		t.Errorf("tag survived removal: %q", after)
+	}
+	if _, err := srv.runTool(ctx, "recall_tag", toolArgs{Action: "bogus", SessionID: "pi:s1"}); err == nil {
+		t.Error("unknown action should error, not silently add")
+	}
+	// The retired names must not linger as dead aliases.
+	for _, gone := range []string{"recall_untag", "recall_tags"} {
+		if _, err := srv.runTool(ctx, gone, toolArgs{}); err == nil {
+			t.Errorf("%s should no longer be a tool", gone)
+		}
+	}
+}

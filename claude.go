@@ -146,6 +146,7 @@ func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int6
 		}
 	}
 	idx := startIdx
+	callNames := map[string]string{} // tool_use id -> tool name, for attributing results
 	consumed, err := scanLines(ctx, fh, func(line []byte) error {
 		var ev ClaudeEvent
 		if JSONUnmarshal(line, &ev) != nil {
@@ -166,7 +167,7 @@ func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int6
 				res.endedAt = ts
 			}
 		}
-		text := ev.Message.Text()
+		text := ev.Message.TextWithCalls(callNames)
 		if text == "" {
 			return nil
 		}
@@ -177,7 +178,11 @@ func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int6
 		if truncate && len(text) > excerptMax {
 			text = text[:excerptMax]
 		}
-		res.msgs = append(res.msgs, Message{SourceID: sessID, Idx: idx, Role: ev.Type, TS: ts, Text: text})
+		role := ev.Type
+		if t := ev.Message.toolFor(callNames); t != "" {
+			role = "toolResult:" + t
+		}
+		res.msgs = append(res.msgs, Message{SourceID: sessID, Idx: idx, Role: role, TS: ts, Text: text})
 		idx++
 		return nil
 	})
@@ -241,6 +246,13 @@ type ClaudePart struct {
 	Text    string `json:"text"`
 	Name    string `json:"name"`
 	Content string `json:"content"`
+	// Anthropic links a result to its call: tool_use carries {id, name, input},
+	// tool_result carries {tool_use_id}. Both were being discarded, so a claude
+	// transcript showed neither what a tool was asked to do nor which tool
+	// produced a given result.
+	ID        string          `json:"id"`
+	ToolUseID string          `json:"tool_use_id"`
+	Input     json.RawMessage `json:"input"`
 }
 
 // claudeLoosePart mirrors ClaudePart but captures content as raw bytes. Used
@@ -295,7 +307,26 @@ func flattenClaudeContent(raw json.RawMessage) string {
 	return ""
 }
 
-func (m ClaudeMessage) Text() string {
+// Text renders the message. callNames maps a tool_use id to its tool name so a
+// later tool_result can be attributed; pass nil when that is not needed.
+func (m ClaudeMessage) Text() string { return m.TextWithCalls(nil) }
+
+// toolFor reports the tool a result belongs to, given the call map.
+func (m ClaudeMessage) toolFor(callNames map[string]string) string {
+	if callNames == nil {
+		return ""
+	}
+	for _, p := range m.Content.parts {
+		if p.Type == "tool_result" && p.ToolUseID != "" {
+			if n := callNames[p.ToolUseID]; n != "" {
+				return n
+			}
+		}
+	}
+	return ""
+}
+
+func (m ClaudeMessage) TextWithCalls(callNames map[string]string) string {
 	if m.Content.str != "" {
 		return m.Content.str
 	}
@@ -320,9 +351,16 @@ func (m ClaudeMessage) Text() string {
 			if b.Len() > 0 {
 				b.WriteByte('\n')
 			}
+			if callNames != nil && p.ID != "" && p.Name != "" {
+				callNames[p.ID] = p.Name
+			}
 			b.WriteString("[tool_use:")
 			b.WriteString(p.Name)
 			b.WriteByte(']')
+			if a := argSummary(p.Input); a != "" {
+				b.WriteByte(' ')
+				b.WriteString(a)
+			}
 		case "tool_result":
 			if p.Content == "" {
 				continue

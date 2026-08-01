@@ -3,17 +3,17 @@
 #
 # Measures the autoresearch primary metric (incremental_index_ms) plus a
 # handful of secondaries. Emits one JSONL line on stdout suitable for
-# appending to autoresearch.jsonl.
+# appending to autoresearch/results.jsonl.
 #
 # Usage:
-#   ./bench.sh                       # run, print one JSONL line
-#   ./bench.sh --full                # also rebuild from scratch (slow)
-#   ./bench.sh --notes "what changed" --status keep --discard-reason ""
+#   ./autoresearch/bench.sh                       # run, print one JSONL line
+#   ./autoresearch/bench.sh --full                # also rebuild from scratch (slow)
+#   ./autoresearch/bench.sh --notes "what changed" --status keep --discard-reason ""
 #
 # Requires: bash, jq, /usr/bin/time, go.
 
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 NOTES=""
 STATUS="keep"
@@ -35,8 +35,18 @@ binary_mb=$(echo "scale=2; $binary_bytes/1024/1024" | bc)
 
 commit=$(git rev-parse --short HEAD 2>/dev/null || echo "uncommitted")
 
+# All timing runs go against a scratch index, never ~/.recall. That directory is
+# shared with other running agents, holds the frozen bench corpus, and stores
+# durable tags — the previous `rm -rf "$HOME/.recall"` below would have taken all
+# three. RECALL_INDEX exists precisely so a benchmark can be isolated.
+export RECALL_INDEX="${RECALL_INDEX:-$HOME/.recall/bench-timing.sqlite}"
+if [[ "$RECALL_INDEX" == "$HOME/.recall/index.sqlite" ]]; then
+  echo "bench.sh: refusing to benchmark against the live index" >&2
+  exit 2
+fi
+
 # 2. Warm-up. Ensure index exists; do a full reindex once if missing.
-if [[ ! -f "$HOME/.recall/index.sqlite" ]]; then
+if [[ ! -f "$RECALL_INDEX" ]]; then
   ./recall index >/dev/null
 fi
 
@@ -61,13 +71,14 @@ done
 query_ms=$((qtotal / 5))
 
 # 5. Index size.
-idx_bytes=$(stat -f%z "$HOME/.recall/index.sqlite" 2>/dev/null || stat -c%s "$HOME/.recall/index.sqlite")
+idx_bytes=$(stat -f%z "$RECALL_INDEX" 2>/dev/null || stat -c%s "$RECALL_INDEX")
 idx_mb=$(echo "scale=2; $idx_bytes/1024/1024" | bc)
 
 # 6. Optional cold rebuild (slow).
 full_s=""
 if [[ "$WITH_FULL" -eq 1 ]]; then
-  rm -rf "$HOME/.recall"
+  # Cold start = remove only the scratch index, not the whole recall home.
+  rm -f "$RECALL_INDEX" "$RECALL_INDEX"-wal "$RECALL_INDEX"-shm
   t=$( { /usr/bin/time -p ./recall index >/dev/null; } 2>&1 | awk '/^real/ {print $2}' )
   full_s="$t"
   if [[ -z "$full_s" ]]; then
@@ -99,7 +110,7 @@ row=$(jq -nc \
     full_index_seconds:$full_index_seconds,
     counts:$counts}')
 
-# Always append to the canonical log so individual `./bench.sh` calls
+# Always append to the canonical log so individual `./autoresearch/bench.sh` calls
 # don't need `| tee -a`. Echo too so the human sees the row.
-echo "$row" >> autoresearch.jsonl
+echo "$row" >> autoresearch/results.jsonl
 echo "$row"
