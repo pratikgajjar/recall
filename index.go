@@ -157,7 +157,7 @@ func bootstrap(db *sql.DB) error {
 	ftsStmts := []string{
 		// `tail` holds everything past the first excerptMax characters of a
 		// message, in windows, as extra rows. It is weighted down at query time
-		// (see ` + tailWeightSQL + `eight) so that deep text is findable without competing with
+		// (see tailWeight) so that deep text is findable without competing with
 		// the opening of a message, which is where the topic is usually stated.
 		// Indexing it at equal weight was measured three ways and cost 7-12% of
 		// MRR every time.

@@ -489,3 +489,32 @@ Worth remembering: a cheap similarity signature measured something 15x larger
 than the real effect, and in the opposite direction of useful. If this is
 revisited — for index size rather than search cost — dedupe at ingest on a
 content fingerprint, never on rendered output.
+
+## Rejected with evidence: not discounting tail matches in the AND pass
+
+The tail column is discounted (tailWeight 0.25) so deep text does not outrank a
+message whose opening is about the query. The argument for exempting the AND
+pass: every row it returns contains *every* term, so a deep match there is as
+complete an answer as a shallow one, and the discount looked arbitrary.
+
+Measured: deep findability 69.2% -> 70.8% on 120 phrases (+2, inside noise).
+Gate: **MRR -3.8%, rank@3 -3, found -1. FAIL.**
+
+The reasoning was wrong. A complete match in the tail is genuinely less relevant
+than a complete match in the opening — position carries information about what a
+message is *about*, not merely what it contains. The discount was doing real work
+in the AND pass too.
+
+Together with the tailWeight sweep, three separate attempts to make deep text
+rank higher have now failed at the same wall. It is not a tuning problem.
+
+## The deep-findability gap was mostly boilerplate, not retrieval
+
+Of 35 deep failures, **29 used a phrase shared by more than 30 sessions** — a
+repeated `ssh … docker restart` command, `ctx cancel context WithTimeout` (df
+137). No ranking can attribute text like that to one session, and `findability()`
+had excluded such phrases from the start. `deep_findability()` did not, so it was
+measuring ambiguity as if it were failure.
+
+Applying the same rule moves it 70% -> 77.9%. Only 6 of 35 failures were real
+retrieval misses.

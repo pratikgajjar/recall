@@ -267,6 +267,7 @@ def deep_findability(db_path, sample=80, seed=11):
     rng = random.Random(seed)
     env = dict(os.environ)
     env["RECALL_INDEX"] = db_path
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     pairs = []
     files = []
     for root in JSONL_SOURCES.values():
@@ -303,8 +304,16 @@ def deep_findability(db_path, sample=80, seed=11):
                 pairs.append((f"{source}:{sid}", cand))
                 break
             break
-    found = 0
+    # Skip phrases too common to identify anything, exactly as findability()
+    # does. Without this the measure is dominated by ambiguity rather than
+    # retrieval: 29 of 35 failures were phrases shared by more than 30 sessions
+    # — a repeated ssh command, a Go context idiom — which no ranking can
+    # attribute to one session.
+    found = boiler = 0
     for want, q in pairs:
+        if doc_freq(con, q) > BOILERPLATE_DF:
+            boiler += 1
+            continue
         try:
             r = subprocess.run([BIN, q, "--json", "--limit", "20"],
                                capture_output=True, env=env, timeout=30)
@@ -312,8 +321,9 @@ def deep_findability(db_path, sample=80, seed=11):
         except Exception:
             continue
         found += want in ids
-    n = len(pairs)
-    return {"sampled": n, "found": found,
+    con.close()
+    n = len(pairs) - boiler
+    return {"sampled": n, "found": found, "boilerplate_only": boiler,
             "found_pct": round(100.0 * found / n, 1) if n else 0.0}
 
 
