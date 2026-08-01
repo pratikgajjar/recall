@@ -800,3 +800,52 @@ func TestSearchDeliversTheLimitWhenMatchesExist(t *testing.T) {
 		t.Errorf("got %d hits from 32 sessions", len(few))
 	}
 }
+
+// Real transcripts contain truncated multibyte sequences — a tool that printed
+// half a rune before dying. Stored raw, the snippet of such a row is not valid
+// UTF-8, and a JSON document containing it is not parseable: two of six sample
+// searches returned a body that no JSON parser would accept, so an agent got a
+// crash instead of results.
+func TestInvalidUTF8NeverReachesTheIndex(t *testing.T) {
+	broken := "a valid opening, then a truncated rune \xc3 and more text after it"
+	if utf8.ValidString(broken) {
+		t.Fatal("fixture is not actually broken")
+	}
+	head, tail := splitForIndex(broken)
+	if !utf8.ValidString(head) {
+		t.Error("head kept invalid UTF-8")
+	}
+	for i, w := range tail {
+		if !utf8.ValidString(w) {
+			t.Errorf("tail window %d kept invalid UTF-8", i)
+		}
+	}
+	// Long enough to window, with the damage deep inside.
+	long := strings.Repeat("padding words here ", 200) + "\xed\xa0\x80" + strings.Repeat(" more padding ", 200)
+	h2, t2 := splitForIndex(long)
+	for _, part := range append([]string{h2}, t2...) {
+		if !utf8.ValidString(part) {
+			t.Fatal("windowed text kept invalid UTF-8")
+		}
+	}
+	// Valid text must survive untouched, including multibyte.
+	clean := "日本語のテキスト and ascii"
+	if h, _ := splitForIndex(clean); h != clean {
+		t.Errorf("valid text was altered: %q", h)
+	}
+}
+
+// The encoder must not emit a document its own reader would reject.
+func TestJSONOutputIsAlwaysValidUTF8(t *testing.T) {
+	out, err := JSONMarshal(map[string]string{"snippet": "half a rune \xc3 here"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.Valid(out) {
+		t.Errorf("encoder emitted invalid UTF-8: %q", out)
+	}
+	var back map[string]string
+	if err := JSONUnmarshal(out, &back); err != nil {
+		t.Errorf("emitted JSON does not parse: %v", err)
+	}
+}

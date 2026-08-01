@@ -613,6 +613,13 @@ var toolArgSuffix = regexp.MustCompile(`(?m)^(\[(?:tool|tool_use):[^\]]+\]|\[cal
 // discounts. Windows overlap so a phrase across a boundary survives whole.
 func splitForIndex(s string) (head string, tail []string) {
 	s = toolArgSuffix.ReplaceAllString(s, "$1")
+	// Transcripts contain truncated multibyte sequences — a tool that printed
+	// half a rune before dying, a log with a stray byte. Storing them means
+	// every consumer has to cope: the snippet of such a row is not valid UTF-8,
+	// and a JSON document containing it is not parseable at all.
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\uFFFD")
+	}
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", nil
