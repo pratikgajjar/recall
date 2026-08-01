@@ -567,3 +567,53 @@ func TestTrimTextStripsCodexCallArgs(t *testing.T) {
 		}
 	}
 }
+
+// A raw "sql: no rows in result set" tells an agent nothing: it cannot tell a
+// typo from a pruned session, so it retries blindly. Three of 329 calls in the
+// real workload hit this path, all with mistyped ids.
+func TestMissingSessionErrorIsActionable(t *testing.T) {
+	ix := newTestIndex(t)
+	if err := ix.IngestBatch(context.Background(), "pi",
+		[]Session{{Source: "pi", SourceID: "019f6df5-70b0-7cfa-ad5f-328d2876b7d3", Title: "t", MsgCount: 1}},
+		[]Message{{SourceID: "019f6df5-70b0-7cfa-ad5f-328d2876b7d3", Idx: 0, Role: "user", Text: "hello"}}); err != nil {
+		t.Fatal(err)
+	}
+	full := "pi:019f6df5-70b0-7cfa-ad5f-328d2876b7d3"
+
+	// Never leak the driver's error.
+	for _, id := range []string{full[:len(full)-4], "pi:nope", "pi:0"} {
+		_, err := ix.LookupSession(id)
+		if err == nil {
+			t.Fatalf("%s should not resolve", id)
+		}
+		if strings.Contains(err.Error(), "no rows in result set") {
+			t.Errorf("driver error leaked for %s: %v", id, err)
+		}
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("error should name the id given: %v", err)
+		}
+	}
+
+	// A near-miss id names the session that was meant — both a lost tail and a
+	// dropped character in the middle.
+	for _, typo := range []string{
+		"pi:019f6df5-70b0-7cfa-ad5f-328d2876",   // truncated
+		"pi:019f6df5-70b0-7cfa-ad5f-328d2876b3", // characters dropped mid-id
+	} {
+		_, err := ix.LookupSession(typo)
+		if err == nil || !strings.Contains(err.Error(), full) {
+			t.Errorf("near-miss %q should suggest %s, got: %v", typo, full, err)
+		}
+	}
+
+	// An id matching nothing says how to find it instead.
+	_, err := ix.LookupSession("pi:totally-unrelated")
+	if err == nil || !strings.Contains(err.Error(), "recall find") {
+		t.Errorf("unknown id should suggest search, got: %v", err)
+	}
+
+	// The real session still resolves.
+	if _, err := ix.LookupSession(full); err != nil {
+		t.Errorf("valid id broke: %v", err)
+	}
+}

@@ -375,7 +375,7 @@ func (s *mcpServer) transcript(ctx context.Context, a toolArgs) (string, error) 
 	}
 	sess, err := s.ix.LookupSession(id)
 	if err != nil {
-		return "", fmt.Errorf("session %s: %w", id, err)
+		return "", err // already names the id and says what to do
 	}
 	ad := adapterFor(sess.Source)
 	if ad == nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1129,11 +1130,59 @@ func (ix *Index) LookupSession(id string) (*Session, error) {
 	row := ix.db.QueryRow(`SELECT source, source_id, COALESCE(project,''), COALESCE(title,''),
 		COALESCE(started_at,0), COALESCE(ended_at,0), COALESCE(msg_count,0)
 		FROM sessions WHERE id = ?`, id)
-	if err := row.Scan(&s.Source, &s.SourceID, &s.Project, &s.Title,
-		&s.StartedAt, &s.EndedAt, &s.MsgCount); err != nil {
+	err := row.Scan(&s.Source, &s.SourceID, &s.Project, &s.Title,
+		&s.StartedAt, &s.EndedAt, &s.MsgCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ix.missingSessionError(id)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// missingSessionError turns "sql: no rows in result set" into something a
+// caller can act on. A raw driver error tells an agent nothing about whether it
+// mistyped the id, the session was pruned, or the id came from another machine
+// — so it retries blindly. Truncated ids are the common case in practice, and
+// a unique prefix match can simply name the one that was meant.
+func (ix *Index) missingSessionError(id string) error {
+	// Try the whole id as a prefix first (plain truncation), then a shorter one.
+	// A dropped character in the middle is just as common as a lost tail, and
+	// both leave enough of the head to identify the session uniquely.
+	for _, n := range []int{len(id), 24} {
+		if n > len(id) {
+			continue
+		}
+		matches := ix.idsWithPrefix(id[:n], 2)
+		if len(matches) == 1 && matches[0] != id {
+			return fmt.Errorf("session %s not found — did you mean %s? (ids differ after %q)",
+				id, matches[0], id[:n])
+		}
+		if len(matches) > 1 {
+			return fmt.Errorf("session %s not found — %s and at least one other id start with %q; pass the full id",
+				id, matches[0], id[:n])
+		}
+	}
+	return fmt.Errorf("session %s not found — it may have been deleted at the source, "+
+		"or the id is from another machine. Find it with: recall find <query>", id)
+}
+
+// idsWithPrefix returns up to limit session ids starting with prefix.
+func (ix *Index) idsWithPrefix(prefix string, limit int) []string {
+	rows, err := ix.db.Query(`SELECT id FROM sessions WHERE id LIKE ? || '%' LIMIT ?`, prefix, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var m string
+		if rows.Scan(&m) == nil {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // ─── Tags ─────────────────────────────────────────────────────────────────

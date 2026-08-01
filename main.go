@@ -1030,7 +1030,8 @@ func printTranscript(ctx context.Context, ix *Index, id string, asJSON bool, opt
 func printTranscriptTo(ctx context.Context, w io.Writer, ix *Index, id string, asJSON bool, opts transcriptOpts) error {
 	s, err := ix.LookupSession(id)
 	if err != nil {
-		return fmt.Errorf("session %s: %w", id, err)
+		// LookupSession already names the id and says what to do about it.
+		return err
 	}
 	ad := adapterFor(s.Source)
 	if ad == nil {
