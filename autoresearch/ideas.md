@@ -518,3 +518,30 @@ measuring ambiguity as if it were failure.
 
 Applying the same rule moves it 70% -> 77.9%. Only 6 of 35 failures were real
 retrieval misses.
+
+## Rejected with evidence: one query shape for filtered and unfiltered search
+
+Unfiltered search uses a pooled shape (rank a top-n pool, apply the recency
+tiebreak to it); filtered search materialises every match and sorts. Two shapes
+is more code than one, and pooling *is* sound for filtered searches as long as
+the filter goes inside the ranked subquery rather than around it — which was
+verified: filter-inside and materialise-all return the same 200 rows in 26ms and
+27ms respectively.
+
+So the shapes were unified. It was worse on both axes:
+
+| | two paths | unified |
+|---|---|---|
+| repo-filtered p50 | 130 ms | 139 ms |
+| repo-filtered p95 | **295 ms** | **816 ms** |
+| unfiltered p50 | 15 ms | 15 ms |
+| identical output | — | **142 of 218 searches** |
+
+Two reasons. A filter already narrows the scan, so there is little for a pool to
+save; and filtered searches usually return few distinct sessions, which triggers
+the pool-growth retry loop — up to three queries where there had been one. The
+differing output is the pool truncating the candidate set before the recency
+tiebreak sees it, which is a real behaviour change with no upside.
+
+The two shapes exist for a reason: a filter narrows before ranking, no filter
+needs ranking to narrow. Reverted.
