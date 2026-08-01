@@ -456,8 +456,8 @@ func (a *luaAdapter) callLine(L *lua.LState, mod *lua.LTable, path string, start
 			res.firstUser = text
 		}
 		res.usage.Chars += int64(len(text))
-		if truncate && len(text) > excerptMax {
-			text = text[:excerptMax]
+		if truncate && len(text) > indexTextMax {
+			text = text[:indexTextMax]
 		}
 		res.msgs = append(res.msgs, Message{Idx: idx, Role: role, TS: ts, Text: text})
 		idx++
@@ -504,8 +504,8 @@ func (a *luaAdapter) tableToMessages(v lua.LValue, sid string, truncate bool, ch
 		if chars != nil {
 			*chars += int64(len(text))
 		}
-		if truncate && len(text) > excerptMax {
-			text = text[:excerptMax]
+		if truncate && len(text) > indexTextMax {
+			text = text[:indexTextMax]
 		}
 		idx := len(out)
 		if iv := lvInt(mt.RawGetString("idx")); iv > 0 || lvHas(mt, "idx") {

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -93,7 +94,10 @@ func openIndexRead(path string) (*Index, error) {
 // schemaVersion bumps when the on-disk schema changes in a way bootstrap can't
 // reach via CREATE IF NOT EXISTS. Each bump triggers a one-shot migration in
 // migrateSchema() (drop legacy FTS, drop dead columns, clear checkpoints).
-const schemaVersion = "5"
+const schemaVersion = "6"
+
+// tailWeightSQL is tailWeight rendered for the bm25() call.
+var tailWeightSQL = strconv.FormatFloat(tailWeight, 'f', -1, 64)
 
 func bootstrap(db *sql.DB) error {
 	stmts := []string{
@@ -151,11 +155,18 @@ func bootstrap(db *sql.DB) error {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
 	ftsStmts := []string{
+		// `tail` holds everything past the first excerptMax characters of a
+		// message, in windows, as extra rows. It is weighted down at query time
+		// (see ` + tailWeightSQL + `eight) so that deep text is findable without competing with
+		// the opening of a message, which is where the topic is usually stated.
+		// Indexing it at equal weight was measured three ways and cost 7-12% of
+		// MRR every time.
 		`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 			session_pk UNINDEXED,
 			idx        UNINDEXED,
 			role       UNINDEXED,
 			text,
+			tail,
 			tokenize = 'porter unicode61 remove_diacritics 1'
 		)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
@@ -341,7 +352,7 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer delFTS.Close()
 
-	insFTS, err := tx.Prepare(`INSERT INTO messages_fts(session_pk, idx, role, text) VALUES(?,?,?,?)`)
+	insFTS, err := tx.Prepare(`INSERT INTO messages_fts(session_pk, idx, role, text, tail) VALUES(?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -451,22 +462,32 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 						return err
 					}
 				}
-				text := trimText(m.Text)
-				if text == "" {
+				head, tails := splitForIndex(m.Text)
+				if head == "" {
 					continue
 				}
-				res, err := insFTS.Exec(pk, m.Idx, m.Role, text)
-				if err != nil {
-					return fmt.Errorf("append msg %s/%d: %w", pk, m.Idx, err)
+				rowsFor := make([][2]string, 0, 1+len(tails))
+				rowsFor = append(rowsFor, [2]string{head, ""})
+				for _, t := range tails {
+					rowsFor = append(rowsFor, [2]string{"", t})
+				}
+				var res sql.Result
+				var err error
+				for _, r := range rowsFor {
+					res, err = insFTS.Exec(pk, m.Idx, m.Role, r[0], r[1])
+					if err != nil {
+						return fmt.Errorf("append msg %s/%d: %w", pk, m.Idx, err)
+					}
+					if rid, e := res.LastInsertId(); e == nil {
+						if aLo < 0 {
+							aLo = rid
+						}
+						aHi = rid
+					}
 				}
 				// Appended rows are a separate run from the session's earlier ones;
-				// record it too, or a later delete would leave them orphaned in FTS.
-				if rid, e := res.LastInsertId(); e == nil {
-					if aLo < 0 {
-						aLo = rid
-					}
-					aHi = rid
-				}
+				// the range is recorded above, or a later delete would leave them
+				// orphaned in FTS.
 				added++
 			}
 			if aLo >= 0 {
@@ -510,20 +531,27 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 					return err
 				}
 			}
-			text := trimText(m.Text)
-			if text == "" {
+			head, tails := splitForIndex(m.Text)
+			if head == "" {
 				continue
 			}
-			res, err := insFTS.Exec(pk, m.Idx, m.Role, text)
-			if err != nil {
-				return fmt.Errorf("insert msg %s/%d: %w", pk, m.Idx, err)
+			rowsFor := make([][2]string, 0, 1+len(tails))
+			rowsFor = append(rowsFor, [2]string{head, ""})
+			for _, t := range tails {
+				rowsFor = append(rowsFor, [2]string{"", t})
 			}
-			// Rows for one session go in consecutively, so the run is [first,last].
-			if rid, err := res.LastInsertId(); err == nil {
-				if lo < 0 {
-					lo = rid
+			for _, r := range rowsFor {
+				res, err := insFTS.Exec(pk, m.Idx, m.Role, r[0], r[1])
+				if err != nil {
+					return fmt.Errorf("insert msg %s/%d: %w", pk, m.Idx, err)
 				}
-				hi = rid
+				// Rows for one session go in consecutively, so the run is [first,last].
+				if rid, err := res.LastInsertId(); err == nil {
+					if lo < 0 {
+						lo = rid
+					}
+					hi = rid
+				}
 			}
 		}
 		if lo >= 0 {
@@ -571,6 +599,76 @@ var toolArgSuffix = regexp.MustCompile(`(?m)^(\[(?:tool|tool_use):[^\]]+\]|\[cal
 // an unrelated query to win the AND pass and crowd out the right session.
 // Only the argument is stripped, never the marker itself — 13% of messages are
 // nothing but a marker, and removing those entirely drops them from the index.
+// splitForIndex divides a message into the opening that is indexed normally and
+// the windows of everything after it.
+//
+// Truncating at excerptMax left 44% of all human and model prose unsearchable:
+// only ~5% of parts are long enough to cut, but they carry nearly half the
+// characters, because long messages are where the substance is. Indexing all of
+// it at equal weight was tried three ways — a bigger cap, and windows 3 and 40
+// deep — and cost 7% to 12.5% of MRR every time: to a two-word query the tail of
+// a long message is mostly noise, and it pushes the right session down.
+//
+// So the opening keeps its place and the rest goes into a column the ranking
+// discounts. Windows overlap so a phrase across a boundary survives whole.
+func splitForIndex(s string) (head string, tail []string) {
+	s = toolArgSuffix.ReplaceAllString(s, "$1")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if len(s) <= excerptMax {
+		return s, nil
+	}
+	cut := boundary(s, 0, excerptMax)
+	head = strings.TrimSpace(s[:cut])
+	// Repetitive text — a progress bar, a log line retried fifty times — yields
+	// windows identical to each other. They add no searchable content, only
+	// rows and term-frequency noise.
+	seen := map[string]bool{head: true}
+	emit := func(w string) {
+		if w == "" || seen[w] {
+			return
+		}
+		seen[w] = true
+		tail = append(tail, w)
+	}
+	for start := cut - chunkOverlap; start < len(s) && len(tail) < maxChunks; {
+		for start > 0 && !utf8.RuneStart(s[start]) {
+			start--
+		}
+		end := start + excerptMax
+		if end >= len(s) {
+			emit(strings.TrimSpace(s[start:]))
+			break
+		}
+		e := boundary(s, start, end)
+		emit(strings.TrimSpace(s[start:e]))
+		next := e - chunkOverlap
+		if next <= start {
+			next = e
+		}
+		start = next
+	}
+	return head, tail
+}
+
+// boundary returns a cut point at or before end that falls on a word break and
+// never inside a rune, so tokens are not sliced in half.
+func boundary(s string, start, end int) int {
+	if end >= len(s) {
+		return len(s)
+	}
+	cut := end
+	if i := strings.LastIndexAny(s[start:end], " \n\t"); i > excerptMax-chunkSnap {
+		cut = start + i
+	}
+	for cut > start && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return cut
+}
+
 func trimText(s string) string {
 	s = toolArgSuffix.ReplaceAllString(s, "$1")
 	s = strings.TrimSpace(s)
@@ -744,8 +842,8 @@ SELECT id, source, source_id, project, title, started_at, idx, role, snippet, ra
          COALESCE(s.project,'') AS project, COALESCE(s.title,'') AS title,
          COALESCE(s.started_at,0) AS started_at,
          f.idx AS idx, f.role AS role,
-         snippet(messages_fts, 3, '«', '»', '…', 12) AS snippet,
-         bm25(messages_fts) AS rank
+         snippet(messages_fts, -1, '«', '»', '…', 12) AS snippet,
+         bm25(messages_fts, 0.0, 0.0, 0.0, 1.0, ` + tailWeightSQL + `) AS rank
     FROM messages_fts f JOIN sessions s ON s.id = f.session_pk
    WHERE ` + strings.Join(bodyWhere, " AND ") + titleUnion + `
 )
@@ -832,8 +930,8 @@ SELECT id, source, source_id, project, title, started_at, idx, role, snippet, ra
          COALESCE(s.started_at,0) AS started_at,
          t.idx AS idx, t.role AS role, t.snippet AS snippet, t.rank AS rank
     FROM (SELECT f.session_pk AS pk, f.idx AS idx, f.role AS role,
-                 snippet(messages_fts, 3, '«', '»', '…', 12) AS snippet,
-                 bm25(messages_fts) AS rank
+                 snippet(messages_fts, -1, '«', '»', '…', 12) AS snippet,
+                 bm25(messages_fts, 0.0, 0.0, 0.0, 1.0, ` + tailWeightSQL + `) AS rank
             FROM messages_fts f
            WHERE messages_fts MATCH ?
            ORDER BY rank LIMIT ?) t

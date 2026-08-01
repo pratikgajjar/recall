@@ -61,3 +61,24 @@ const (
 	poolFactor = 8
 	poolMin    = 200
 )
+
+// tailWeight discounts matches in the tail column — everything past the opening
+// of a long message. Deep text should be findable when it is the only thing that
+// matches, without outranking a message whose opening is about the query.
+const tailWeight = 0.25
+
+// Windowing bounds for the tail column (see splitForIndex).
+const (
+	// maxChunks bounds the pathological case: a few messages in a real corpus
+	// are over a megabyte of pasted log and would otherwise become hundreds of
+	// rows each.
+	maxChunks    = 40
+	chunkOverlap = 150
+	chunkSnap    = 200
+)
+
+// indexTextMax is how much of a message an adapter hands to the indexer. It was
+// excerptMax, which meant text was already truncated before the indexer saw it —
+// so windowing the tail was a silent no-op on every source. The bound remains
+// only to keep a pasted megabyte out of memory.
+const indexTextMax = maxChunks * excerptMax

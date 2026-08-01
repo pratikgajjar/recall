@@ -177,8 +177,8 @@ func (a *CodexAdapter) parse(ctx context.Context, path string, startOffset int64
 			if role == "user" && res.firstUser == "" && !looksLikeWrapper(text) {
 				res.firstUser = text
 			}
-			if truncate && len(text) > excerptMax {
-				text = text[:excerptMax]
+			if truncate && len(text) > indexTextMax {
+				text = text[:indexTextMax]
 			}
 			res.msgs = append(res.msgs, Message{SourceID: res.sessID, Idx: idx, Role: role, TS: ts, Text: text})
 			idx++

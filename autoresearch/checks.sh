@@ -36,8 +36,12 @@ grepcheck "search finds 'race condition'" '[Rr]ace|[Cc]ondition' "$BIN" "race co
 grepcheck "search finds 'schema migration'" 'id=' "$BIN" "schema migration" --limit 5
 
 # Pick a real, large session to exercise transcript modes against.
-SID=$("$BIN" sessions --limit 40 --json 2>/dev/null \
-      | python3 -c 'import sys,json;h=json.load(sys.stdin);print(h[0]["session_id"] if h else "")')
+# ...which means the largest, not merely the most recent. The newest session is
+# often two messages long, and every transcript check below then passes or fails
+# on whether one trivial session happens to contain the word "the". msg_count is
+# not exposed by `sessions --json`, so read it from the index.
+SID=$(sqlite3 "$RECALL_INDEX" \
+      "SELECT id FROM sessions ORDER BY COALESCE(msg_count,0) DESC LIMIT 1" 2>/dev/null)
 if [ -z "$SID" ]; then echo "  no session available for transcript checks"; exit 1; fi
 
 # 2. An outline must remain *navigable*: it has to expose position markers that

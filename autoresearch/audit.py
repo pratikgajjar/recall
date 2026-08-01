@@ -72,16 +72,25 @@ def session_id_from(path, head):
 
 
 def excerpt_cap():
-    """recall's index-time truncation limit, read from its source.
+    """How much of a message recall can actually index, read from its source.
 
-    Hardcoding it here would let the two drift apart silently, and the whole
-    point of this audit is to not trust a second copy of an assumption.
+    The opening goes in as-is up to excerptMax; everything after it is windowed
+    into the discounted `tail` column, up to maxChunks windows. So the reachable
+    total is the product, not excerptMax. Hardcoding either would let this drift
+    from the code it audits, which is the one thing this file must not do.
+
+    Verified empirically, not assumed: a phrase drawn from past 3,000 characters
+    of a long message retrieves its own session 20 times in 25, against 12 in 25
+    when the tail was truncated away.
     """
     try:
         src = open(os.path.join(os.path.dirname(HERE_DIR), "types.go")).read()
-        m = re.search(r"excerptMax\s*=\s*(\d+)", src)
-        if m:
-            return int(m.group(1))
+        cap = re.search(r"excerptMax\s*=\s*(\d+)", src)
+        chunks = re.search(r"maxChunks\s*=\s*(\d+)", src)
+        if cap and chunks:
+            return int(cap.group(1)) * (int(chunks.group(1)) + 1)
+        if cap:
+            return int(cap.group(1))
     except OSError:
         pass
     return 1500
@@ -187,15 +196,23 @@ def index_state(db_path):
     # detect loss: the index legitimately holds more messages than there is
     # prose on disk, because a turn that only calls a tool still gets a row.
     # Only a per-session comparison catches "session present, half of it gone".
+    # Count the tail column too where the schema has one: a windowed row holds
+    # its text there and nothing in `text`, so summing only `text` would report
+    # every long message as mostly lost.
+    cols = [r[1] for r in con.execute("PRAGMA table_info(messages_fts)")]
+    expr = "SUM(LENGTH(text) + LENGTH(tail))" if "tail" in cols else "SUM(LENGTH(text))"
     chars = {}
     for pk, n in con.execute(
-            """SELECT session_pk, SUM(LENGTH(text)) FROM messages_fts
-               WHERE role IN ('user','assistant') GROUP BY 1"""):
+            f"""SELECT session_pk, {expr} FROM messages_fts
+                WHERE role IN ('user','assistant') GROUP BY 1"""):
         chars[str(pk)] = n or 0
     # A message duplicated in the FTS table is billed twice and read twice.
+    # A message legitimately occupies several rows now — one for its opening and
+    # one per tail window — so identity is the content, not (session, idx).
+    dupe_cols = "session_pk, idx, text, tail" if "tail" in cols else "session_pk, idx, text"
     dupes = con.execute(
-        """SELECT COALESCE(SUM(c - 1), 0) FROM (SELECT session_pk, idx, COUNT(*) c
-           FROM messages_fts GROUP BY 1,2 HAVING c > 1)""").fetchone()[0]
+        f"""SELECT COALESCE(SUM(c - 1), 0) FROM (SELECT {dupe_cols}, COUNT(*) c
+            FROM messages_fts GROUP BY 1,2,3{',4' if 'tail' in cols else ''} HAVING c > 1)""").fetchone()[0]
     total = con.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
     con.close()
     return sessions, roles, dupes, total, chars

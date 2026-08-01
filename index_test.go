@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func ftsRowCount(t *testing.T, ix *Index, pk string) int {
@@ -674,5 +675,70 @@ func TestFilteredSearchIsNotPooled(t *testing.T) {
 			t.Errorf("results are not in rank order at %d: %v then %v",
 				i, all[i-1].Rank, all[i].Rank)
 		}
+	}
+}
+
+// The opening of a message is indexed normally; everything after it goes into a
+// column the ranking discounts. Indexing all of it at equal weight was measured
+// three ways and cost 7-12.5% of MRR each time, so the split is the point.
+func TestSplitForIndexKeepsTailSearchable(t *testing.T) {
+	short := "a short message"
+	if h, tail := splitForIndex(short); h != short || tail != nil {
+		t.Fatalf("short text must pass through whole, got %q / %v", h, tail)
+	}
+	if h, _ := splitForIndex("   "); h != "" {
+		t.Error("blank text should produce no rows")
+	}
+
+	var b strings.Builder
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&b, "word%d ", i)
+	}
+	head, tail := splitForIndex(b.String())
+	if len(head) > excerptMax {
+		t.Errorf("head is %d bytes, over excerptMax %d", len(head), excerptMax)
+	}
+	if len(tail) == 0 {
+		t.Fatal("a long message must produce tail windows")
+	}
+	joined := head + " " + strings.Join(tail, " ")
+	for _, probe := range []string{"word0", "word1999", "word3999"} {
+		if !strings.Contains(joined, probe) {
+			t.Errorf("%q was dropped — it would be unsearchable", probe)
+		}
+	}
+	for i, c := range tail {
+		if len(c) > excerptMax {
+			t.Errorf("tail window %d is %d bytes, over excerptMax", i, len(c))
+		}
+		if !utf8.ValidString(c) {
+			t.Errorf("tail window %d split a rune", i)
+		}
+	}
+
+	// A phrase straddling the head/tail boundary must survive whole somewhere,
+	// or it becomes unsearchable exactly at the seam.
+	seam := strings.Repeat("x", excerptMax-20) + " distinctive phrase here " + strings.Repeat("y", 4000)
+	h2, t2 := splitForIndex(seam)
+	var whole bool
+	for _, c := range append([]string{h2}, t2...) {
+		if strings.Contains(c, "distinctive phrase here") {
+			whole = true
+		}
+	}
+	if !whole {
+		t.Error("a phrase across the head/tail boundary must survive in one window")
+	}
+
+	for _, c := range func() []string {
+		h, tl := splitForIndex(strings.Repeat("日本語のテキスト ", 900))
+		return append([]string{h}, tl...)
+	}() {
+		if !utf8.ValidString(c) {
+			t.Fatal("multibyte text split mid-rune")
+		}
+	}
+	if _, tl := splitForIndex(strings.Repeat("z", 5_000_000)); len(tl) > maxChunks {
+		t.Errorf("got %d tail windows, maxChunks is %d", len(tl), maxChunks)
 	}
 }

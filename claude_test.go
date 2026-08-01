@@ -123,13 +123,23 @@ func TestClaudeFetchUntruncated(t *testing.T) {
 	)
 	ad := &ClaudeAdapter{Root: root}
 
-	// Scan stores a truncated excerpt.
+	// Scan hands the indexer the whole message, up to indexTextMax. It used to
+	// cut at excerptMax, which left everything past it unsearchable for good;
+	// the indexer now keeps the opening and windows the rest into the tail
+	// column instead.
 	_, msgs, _, err := ad.Scan(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(msgs[0].Text); got != excerptMax {
-		t.Errorf("indexed excerpt len = %d, want %d", got, excerptMax)
+	if got := len(msgs[0].Text); got != excerptMax+500 {
+		t.Errorf("scanned len = %d, want the message intact at %d", got, excerptMax+500)
+	}
+	head, tail := splitForIndex(msgs[0].Text)
+	if len(head) > excerptMax {
+		t.Errorf("head is %d, over excerptMax %d", len(head), excerptMax)
+	}
+	if len(tail) == 0 {
+		t.Error("the part past excerptMax should be windowed into the tail column")
 	}
 	// Fetch returns the full untruncated message.
 	full, err := ad.Fetch(context.Background(), "sess-claude-3")

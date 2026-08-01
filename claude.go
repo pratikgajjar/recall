@@ -175,8 +175,8 @@ func (a *ClaudeAdapter) parse(ctx context.Context, path string, startOffset int6
 			res.firstUser = text
 		}
 		res.chars += int64(len(text))
-		if truncate && len(text) > excerptMax {
-			text = text[:excerptMax]
+		if truncate && len(text) > indexTextMax {
+			text = text[:indexTextMax]
 		}
 		role := ev.Type
 		if t := ev.Message.toolFor(callNames); t != "" {

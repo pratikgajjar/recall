@@ -169,8 +169,8 @@ func (a *CursorAgentAdapter) parse(ctx context.Context, path string, startOffset
 			res.firstUser = text
 		}
 		res.chars += int64(len(text))
-		if truncate && len(text) > excerptMax {
-			text = text[:excerptMax]
+		if truncate && len(text) > indexTextMax {
+			text = text[:indexTextMax]
 		}
 		res.msgs = append(res.msgs, Message{SourceID: res.sessID, Idx: idx, Role: rec.Role, TS: 0, Text: text})
 		idx++
