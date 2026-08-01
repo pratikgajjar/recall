@@ -4,7 +4,11 @@ This file holds the optimization objective and rules for the autoresearch loop
 that lives **inside the recall repo itself**, separate from any other repo's
 autoresearch. The pi harness's autoresearch tools point at pi's cwd, so we do
 not use them here. Experiments are run with `Bash` + `time`, results recorded
-manually in `autoresearch/results.jsonl`, and commits made in lockstep.
+in `autoresearch.jsonl` at the repo root — that file is written by the pi
+harness, so it stays there while every other artifact lives in `autoresearch/`.
+Results from the previous single-metric era are kept in
+`autoresearch/results-archive-workload_kch.jsonl`; they are not comparable to
+`recall_score` and are retained only as a record of what was tried.
 
 ## Objective
 
@@ -96,7 +100,7 @@ were debugging. It is gitignored and must stay that way. Regenerate it locally:
     autoresearch/extract_workload.py
 
 Before pushing, sweep for identifiable names, ticket ids, internal hosts and
-secrets across every tracked file — including `autoresearch/results.jsonl`, where it is
+secrets across every tracked file — including `autoresearch.jsonl`, where it is
 easy to quote a real query into an experiment description, and doc examples,
 where it is easy to reach for a real vendor or project name. Use invented names
 in examples.
@@ -110,7 +114,7 @@ in examples.
 - A "keep" result must produce a smoke-test pass: full `recall index --full`
   still produces the same session count and FTS still finds known hits
   (`recall "import cycle"` and `recall "race condition"`).
-- One change per commit, one row per `autoresearch/results.jsonl` line. Use status
+- One change per commit, one row per `autoresearch.jsonl` line. Use status
   values `keep`, `discard`, `crash`.
 - `autoresearch/ideas.md` collects optimizations we want to try later.
   Move them up to the loop when they're ripe; prune when they go stale.
