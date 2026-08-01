@@ -63,6 +63,11 @@ func openIndex(path string) (*Index, error) {
 	db.SetMaxOpenConns(1)
 	if err := bootstrap(db); err != nil {
 		db.Close()
+		// A schema refusal is already a complete sentence aimed at a person;
+		// wrapping it in "bootstrap:" only buries the instruction.
+		if errors.Is(err, errNewerSchema) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("bootstrap: %w", err)
 	}
 	return &Index{db: db}, nil
@@ -82,6 +87,11 @@ func openIndexRead(path string) (*Index, error) {
 	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&v)
 	if v != schemaVersion {
 		db.Close()
+		if newerSchema(v) {
+			return nil, fmt.Errorf("%w (v%s); this build understands v%s — upgrade recall."+
+				" Rebuilding here would downgrade an index other tools may be sharing",
+				errNewerSchema, v, schemaVersion)
+		}
 		have := v
 		if have == "" {
 			have = "legacy"
@@ -152,6 +162,9 @@ func bootstrap(db *sql.DB) error {
 		}
 	}
 	if err := migrateSchema(db); err != nil {
+		if errors.Is(err, errNewerSchema) {
+			return err
+		}
 		return fmt.Errorf("migrate schema: %w", err)
 	}
 	ftsStmts := []string{
@@ -200,6 +213,27 @@ func bootstrap(db *sql.DB) error {
 //     range on the way through, so the index heals itself as sessions are
 //     touched. No migration step and no forced rescan.
 //
+// errNewerSchema marks the one situation where rebuilding is the wrong answer.
+var errNewerSchema = errors.New("index was written by a newer recall")
+
+// newerSchema reports whether an index was written by a build that knows more
+// than this one. Treating that as "outdated" and rebuilding is how a shared
+// index gets downgraded: the newer tool then finds an old index, rebuilds it
+// forward, and the two take turns destroying each other's work — minutes a
+// cycle. A version that does not parse is from before versions were numbers,
+// which is genuinely older.
+func newerSchema(have string) bool {
+	h, err := strconv.Atoi(strings.TrimSpace(have))
+	if err != nil {
+		return false
+	}
+	w, err := strconv.Atoi(schemaVersion)
+	if err != nil {
+		return false
+	}
+	return h > w
+}
+
 // tableExists reports whether a table is present, so a shape check can tell
 // "wrong shape" from "not created yet".
 func tableExists(db *sql.DB, name string) (bool, error) {
@@ -215,6 +249,12 @@ func migrateSchema(db *sql.DB) error {
 	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version)
 	if version == schemaVersion {
 		return nil
+	}
+	// Never migrate downwards. Writing an older shape into a newer index loses
+	// whatever the newer build recorded, silently.
+	if newerSchema(version) {
+		return fmt.Errorf("%w (v%s); this build understands v%s — upgrade recall"+
+			" rather than rebuilding", errNewerSchema, version, schemaVersion)
 	}
 
 	dirty := false

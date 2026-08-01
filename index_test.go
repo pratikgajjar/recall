@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -928,5 +929,70 @@ func TestSchemaUpgradeRebuildsTheTable(t *testing.T) {
 	hits, err := ix.Search("hello", SearchOpts{Limit: 5})
 	if err != nil || len(hits) == 0 {
 		t.Errorf("upgraded index does not search: %v, %d hits", err, len(hits))
+	}
+}
+
+// An index newer than this build must be left alone. Treating it as "outdated"
+// and rebuilding is how a shared index gets downgraded: the newer tool then
+// finds an old index and rebuilds it forward, and the two take turns destroying
+// each other's work at minutes a cycle. This machine runs several agents, each
+// potentially carrying its own recall binary, so the case is routine.
+func TestNewerIndexIsRefusedNotDowngraded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "future.sqlite")
+
+	ix, err := openIndex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.IngestBatch(context.Background(), "pi",
+		[]Session{{Source: "pi", SourceID: "s", Title: "t", MsgCount: 1}},
+		[]Message{{SourceID: "s", Idx: 0, Role: "user", Text: "written by the future"}}); err != nil {
+		t.Fatal(err)
+	}
+	ix.Close()
+
+	raw, err := sql.Open("sqlite", indexDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE meta SET v='9' WHERE k='schema_version'`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	for _, open := range []struct {
+		name string
+		fn   func(string) (*Index, error)
+	}{{"write", openIndex}, {"read", openIndexRead}} {
+		got, err := open.fn(path)
+		if err == nil {
+			got.Close()
+			t.Fatalf("%s path accepted a newer index", open.name)
+		}
+		if !errors.Is(err, errNewerSchema) {
+			t.Errorf("%s path: %v — should name the version problem", open.name, err)
+		}
+		if strings.Contains(err.Error(), "rebuild`") || strings.Contains(err.Error(), "run `recall index`") {
+			t.Errorf("%s path advises rebuilding, which downgrades: %v", open.name, err)
+		}
+	}
+
+	// Nothing may have been written on the way past.
+	raw, _ = sql.Open("sqlite", indexDSN(path, true))
+	defer raw.Close()
+	var v string
+	if err := raw.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "9" {
+		t.Errorf("version marker was rewritten to %q — the index was downgraded", v)
+	}
+	var n int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM messages_fts`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("content changed: %d rows, want 1", n)
 	}
 }
