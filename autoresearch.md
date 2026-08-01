@@ -73,6 +73,25 @@ twice here: codex once dropped 2,336 of 2,336 lines behind a decode error, and
 claude tool calls went unattributed for three rounds because the local corpus
 never exercised them.
 
+### The ranking gate can veto the score
+
+`recall_score` is necessary, not sufficient. No term in it measures whether the
+right session still beats its competitors for a short, ambiguous query — the
+thing agents actually type. Raising `excerptMax` to 24000 scored **+4.5**
+(reliability 77.2 -> 91.9, because 44% more prose became searchable) while MRR
+fell **8.8%** and rank@3 went 22 -> 18. The score would have accepted it.
+
+So any change that alters indexed text must pass:
+
+    autoresearch/gate_ranking.sh          # control = HEAD, treatment = worktree
+
+It builds two indexes from the same disk in the same minute and compares
+retrieval on real queries; only a same-data comparison isolates the code, since
+the corpus grows constantly. A relative MRR loss over 3% fails. **A change that
+fails this gate is discarded no matter what `recall_score` says.**
+
+Report `mrr` as a secondary metric on every experiment that touches indexing.
+
 ## Secondary metrics (watched, not optimized for)
 
 Every sub-score above is reported on every run. The axis scores are what get

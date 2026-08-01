@@ -370,3 +370,40 @@ a principled generalisation (e.g. "the only string field") is untested.
   the steering, `session_id`, `context` and the leaner schema all reach agents
   only once the extension is republished and updated. That re-extraction is the
   real test of this whole round — outline-call share should collapse.
+
+## Rejected with evidence: indexing deep message text (3 attempts)
+
+`excerptMax = 1500` leaves 44% of all human and model prose unsearchable. Three
+ways of fixing that were built and measured against the same control, all on the
+same disk in the same minute:
+
+| variant | deep text indexed | MRR | found | rank@3 |
+|---|---|---|---|---|
+| control (truncate at 1500) | none | 0.1427 | 28 | 22 |
+| raise cap to 24000 | one long document | 0.1302 (-8.8%) | 28 | 18 |
+| overlapping windows, max 3 | 4.5k/message | 0.1327 (-7.0%) | 27 | 21 |
+| overlapping windows, max 40 | 60k/message | 0.1249 (-12.5%) | 26 | 17 |
+
+It works — a phrase from beyond 3,000 characters found its own session 23/25 of
+the time with windowing, against 12/25 truncated. And it costs retrieval on the
+short topical queries agents actually type, in proportion to how much is added.
+The first 1,500 characters of a message carry the signal; the rest is mostly
+noise to a two-word query, and it pushes the right session down.
+
+Two things worth knowing before trying again:
+
+- **The adapters truncate before the indexer sees anything.** `pi.go`,
+  `codex.go`, `claude.go` and `cursor_agent.go` all cut at `excerptMax` during
+  `Scan`, so the first version of windowing was a silent no-op — the index grew
+  by 15k rows (from cursor, which does not pre-cut) and deep findability did not
+  move at all. Any future attempt must raise `indexTextMax` in the adapters too.
+- **This is a trade, not a defect.** Deep text serves recalling a specific
+  detail; head text serves finding the right session. Making them compete in one
+  ranking is what fails.
+
+### Next thing to try: let deep text be findable without competing
+
+Put deep windows in a second FTS column and weight it down —
+`bm25(messages_fts, 0, 0, 0, 1.0, 0.25)` — so a deep match surfaces when nothing
+else matches but never outranks a head match. FTS5 cannot `ALTER TABLE ADD
+COLUMN`, so this needs the table rebuilt behind a schema bump to v6. Untested.

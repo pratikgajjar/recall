@@ -31,6 +31,8 @@ venv/
 # public, so it is never committed. Regenerate it with:
 #   autoresearch/extract_workload.py
 autoresearch/agent_workload.json
+autoresearch/rank_pairs.json
+autoresearch/nav_pairs.json
 
 # Scratch indexes used by the benchmarks (see RECALL_INDEX)
 *.sqlite

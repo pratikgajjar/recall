@@ -60,8 +60,58 @@ def window(rng, total):
     return val(lo_s, 0), val(hi_s, total)
 
 
+def build_pairs(dst, sessions=None):
+    """Recover every place an agent outlined a session then sliced a range in it.
+
+    That pattern is the navigation cost this benchmark exists to measure: two
+    calls to reach one passage.
+    """
+    import glob
+    root = sessions or os.path.expanduser("~/.pi/agent/sessions")
+    pairs, seen = [], set()
+    for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+        calls = []
+        try:
+            fh = open(path, errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"message"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                m = d.get("message", {})
+                if m.get("role") == "assistant" and isinstance(m.get("content"), list):
+                    for part in m["content"]:
+                        if isinstance(part, dict) and part.get("type") == "toolCall" \
+                                and part.get("name") == "recall_transcript":
+                            calls.append(part.get("arguments") or {})
+        # an outline followed by a range on the same session
+        for i, a in enumerate(calls):
+            if not a.get("outline"):
+                continue
+            for b in calls[i + 1:i + 4]:
+                if b.get("session_id") == a.get("session_id") and b.get("range"):
+                    key = (a.get("session_id"), b["range"])
+                    if key not in seen:
+                        seen.add(key)
+                        pairs.append({"session_id": a["session_id"], "range": b["range"]})
+                    break
+    json.dump(pairs, open(dst, "w"), indent=1, sort_keys=True)
+    return pairs
+
+
 def main():
-    pairs = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "/tmp/nav_pairs.json"))
+    # Derived data belongs beside the script, not in /tmp, where it evaporates
+    # and takes the benchmark with it. Regenerate when missing.
+    default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nav_pairs.json")
+    path = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else default
+    if not os.path.exists(path):
+        build_pairs(path)
+    pairs = json.load(open(path))
     tot_a = tot_b = tot_c = 0
     located = usable = 0
     rows = []

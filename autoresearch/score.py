@@ -176,24 +176,36 @@ def performance(index_path, cold_s, incr_s):
 # ----------------------------------------------------------------------- cost
 
 def cost(index_path):
+    """What an agent pays, in characters, to use recall.
+
+    Every term here has to be something a code change can move. An earlier
+    version scored ranking from ranking.py, which reads rank out of what agents
+    saw historically — a number no change can affect, sitting frozen inside a
+    score meant to detect change. Live retrieval quality is now a gate
+    (rank_live.py) rather than a term, because its absolute value is misleading:
+    the corpus has grown ~30x since those searches ran, so a session the agent
+    once picked from ten candidates now competes with thousands, and "found"
+    falling is not the same as recall getting worse.
+    """
     rep = run_json([os.path.join(HERE, "replay.py"), "--split", "dev", "--json"])[0]
-    rank = run_json([os.path.join(HERE, "ranking.py"), "--json"])[0]
     raw = {
         "workload_kch": rep["total_kch"],
         "est_tokens": rep["est_tokens"],
-        "rank_at_1_pct": rank.get("rank_at_1_pct", 0.0),
-        "mrr": rank.get("mrr", 0.0),
-        "miss_pct": rank.get("chose_outside_results_pct", 100.0),
+        "schema_chars": rep["schema_chars"],
+        "outline_chars": rep["outline_chars"],
+        "chars_search": rep["chars_search"],
+        "chars_transcript": rep["chars_transcript"],
     }
     subs = {
-        # Characters the workload costs an agent. 400k is roughly the floor if
-        # every answer were perfectly targeted; 1600k is the unbudgeted original.
+        # Characters the whole replayed workload costs. 400k is roughly the
+        # floor if every answer were perfectly targeted; 1600k is the original.
         "token_cost": norm(raw["workload_kch"], 1600.0, 400.0),
-        # Ranking is a cost metric: a session ranked 8th is read after seven
-        # wrong ones. MRR folds in how far down the right answer sits.
-        "ranking": norm(raw["mrr"], 0.0, 1.0),
-        # Never returning the right session at all is the expensive failure.
-        "retrieval_hit": norm(100.0 - raw["miss_pct"], 0.0, 100.0),
+        # The tool schema is re-sent on every single turn, whether or not recall
+        # is used: the one cost every agent pays unconditionally.
+        "schema_cost": norm(raw["schema_chars"], 8000.0, 2000.0),
+        # Outlines are the navigation surface — what an agent reads to decide
+        # what to read. Cheap navigation is what makes a big session affordable.
+        "outline_cost": norm(raw["outline_chars"], 400000.0, 100000.0),
     }
     return subs, raw
 
