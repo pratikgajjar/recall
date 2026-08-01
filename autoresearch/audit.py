@@ -251,6 +251,67 @@ def doc_freq(con, phrase):
 BOILERPLATE_DF = 30
 
 
+def deep_findability(db_path, sample=40, seed=11):
+    """Can a phrase from deep inside a long message retrieve its session?
+
+    findability() draws from the opening of prose messages, so it says nothing
+    about text past the first window — and nothing at all about tool output,
+    which is most of what a session contains. Without this, dropping deep text
+    to save disk looks free: skipping tail windows for tool results alone halves
+    the index, changes no other number in this rubric, and quietly costs 41% of
+    deep tool-output retrieval.
+
+    Phrases are drawn from past 3,000 characters, across prose and tool output
+    both, in the proportion they occur.
+    """
+    rng = random.Random(seed)
+    env = dict(os.environ)
+    env["RECALL_INDEX"] = db_path
+    pairs = []
+    files = []
+    for root in JSONL_SOURCES.values():
+        files.extend(glob.glob(os.path.expanduser(root) + "/**/*.jsonl", recursive=True))
+    rng.shuffle(files)
+    for path in files:
+        if len(pairs) >= sample:
+            break
+        try:
+            lines = open(path, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        sid = session_id_from(path, lines[:6])
+        source = "pi" if "/.pi/" in path else "codex" if "/.codex/" in path else "claude"
+        for line in lines:
+            if '"role"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            m = d.get("message")
+            if not isinstance(m, dict) or not m.get("role"):
+                continue
+            text = "\n".join(prose_parts(m.get("content")))
+            if len(text) < 5000:
+                continue
+            for cand in candidate_phrases(text[3000:], limit=1):
+                pairs.append((f"{source}:{sid}", cand))
+                break
+            break
+    found = 0
+    for want, q in pairs:
+        try:
+            r = subprocess.run([BIN, q, "--json", "--limit", "20"],
+                               capture_output=True, env=env, timeout=30)
+            ids = [h.get("session_id") for h in (json.loads(r.stdout or "[]") or [])]
+        except Exception:
+            continue
+        found += want in ids
+    n = len(pairs)
+    return {"sampled": n, "found": found,
+            "found_pct": round(100.0 * found / n, 1) if n else 0.0}
+
+
 def findability(disk, db_path, sample, seed=7):
     """Search for a rare real sentence; expect its own session back.
 
@@ -360,6 +421,7 @@ def main():
     cov_messages = 100.0 * (checked - lossy) / checked if checked else 100.0
 
     find = findability(disk, a.index, a.sample)
+    deep = deep_findability(a.index)
 
     out = {
         "sessions_on_disk": n_disk,
@@ -382,6 +444,9 @@ def main():
         "parts_total": capinfo["parts_total"],
         "prose_chars": capinfo["prose_chars"],
         "findability_pct": find["found_pct"],
+        "findability_deep_pct": deep["found_pct"],
+        "findability_deep_detail": deep,
+        "index_mb": round(os.path.getsize(a.index) / 1e6, 1),
         "findability_detail": find,
         "examples_missing_sessions": [f"{s}:{i}" for s, i in missing[:5]],
     }
@@ -402,6 +467,10 @@ def main():
         print(f"searchable prose     {out['searchable_prose_pct']}% of "
               f"{out['prose_chars']:,} chars survive excerptMax={cap} "
               f"({out['parts_truncated']:,}/{out['parts_total']:,} parts cut)")
+        print(f"deep findability     {out['findability_deep_pct']}% "
+              f"({deep['found']}/{deep['sampled']} phrases from past 3,000 chars, "
+              f"prose and tool output)")
+        print(f"index size           {out['index_mb']} MB")
         print(f"findability          {out['findability_pct']}% "
               f"({find['found']}/{find['sampled']} real sentences found their session)")
         print(f"  (skipped {find['boilerplate_only']} sessions whose prose is all boilerplate)")

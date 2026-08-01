@@ -407,3 +407,30 @@ Put deep windows in a second FTS column and weight it down —
 `bm25(messages_fts, 0, 0, 0, 1.0, 0.25)` — so a deep match surfaces when nothing
 else matches but never outranks a head match. FTS5 cannot `ALTER TABLE ADD
 COLUMN`, so this needs the table rebuilt behind a schema bump to v6. Untested.
+
+## Rejected with evidence: skipping tail windows for tool output
+
+Tool results are 73% of all tail rows and 153MB of indexed text. Dropping their
+deep windows halves the index — 770MB to 424MB, 612k rows to 486k — and costs
+nothing that the rubric measured at the time:
+
+| | all tails | prose-only tails |
+|---|---|---|
+| index size | 770 MB | 424 MB |
+| deep prose findability | 19/22 | 19/22 |
+| **deep tool-output findability** | **19/22** | **10/22** |
+| searchable_prose | 94.5% | 94.5% |
+
+`searchable_prose` counts human and model prose only, so it does not move at
+all. That is the whole problem: saving 346MB by indexing less looked free.
+
+Rejected because agents search tool output constantly — an error string is
+exactly the kind of thing someone half-remembers — and because index size is not
+a scored metric, so nothing was gained on the rubric either. Index overhead is
+2.1x the text it holds, which is normal for FTS5: the index is large because it
+indexes a lot, not because it is wasteful. Adding size as a scored metric was
+considered and rejected for creating pressure to index less, which is what the
+reliability axis exists to prevent.
+
+`findability_deep` now measures phrases from past 3,000 characters across prose
+and tool output both, so this trade is visible next time rather than free.

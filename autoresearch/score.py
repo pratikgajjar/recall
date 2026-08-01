@@ -72,6 +72,10 @@ def reliability(index_path, sample):
         # Prose that survives the index-time truncation cap. Text beyond it is
         # in the transcript but has no route to search.
         "searchable_prose": norm(a.get("searchable_prose_pct", 100.0), 80.0, 100.0),
+        # Whether deep text is genuinely retrievable, across prose and tool
+        # output alike. Without this, dropping deep content to save disk scores
+        # as free: it halves the index and moves no other number here.
+        "findability_deep": norm(a.get("findability_deep_pct", 0.0), 50.0, 100.0),
     }
     return subs, a
 
