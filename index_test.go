@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -872,5 +873,60 @@ func TestHugeMessageIsWindowedThroughout(t *testing.T) {
 	// The bound must still hold for something absurd.
 	if _, huge := splitForIndex(strings.Repeat("abcdefghij ", 2_000_000)); len(huge) > maxChunks {
 		t.Errorf("unbounded: %d windows", len(huge))
+	}
+}
+
+// A schema bump must rebuild the FTS table, not merely record a new number.
+// v5->v6 added a `tail` column and the migration enumerated version transitions
+// one at a time, so it missed it: the marker was written as 6, the table stayed
+// at 5, and because the marker then matched nothing ever noticed. Every later
+// ingest failed with "table messages_fts has no column named tail" while the
+// index still looked current — silent, and permanent until someone deleted it.
+func TestSchemaUpgradeRebuildsTheTable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "old.sqlite")
+
+	// An index shaped like the previous schema: no tail column, a checkpoint
+	// claiming the work is already done, and the old version marker.
+	raw, err := sql.Open("sqlite", indexDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE VIRTUAL TABLE messages_fts USING fts5(session_pk UNINDEXED, idx UNINDEXED, role UNINDEXED, text)`,
+		`CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)`,
+		`INSERT INTO meta(k,v) VALUES('schema_version','5')`,
+		`INSERT INTO meta(k,v) VALUES('ckpt:pi','{"done":true}')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw.Close()
+
+	ix, err := openIndex(path)
+	if err != nil {
+		t.Fatalf("opening an older index should upgrade it, got: %v", err)
+	}
+	defer ix.Close()
+
+	// The table must now accept what this build writes.
+	if err := ix.IngestBatch(context.Background(), "pi",
+		[]Session{{Source: "pi", SourceID: "s", Title: "t", MsgCount: 1}},
+		[]Message{{SourceID: "s", Idx: 0, Role: "user", Text: "hello"}}); err != nil {
+		t.Fatalf("ingest after upgrade failed — the table was not rebuilt: %v", err)
+	}
+	// ...and the checkpoint must be gone, or the rebuilt table stays empty
+	// because every adapter believes its work is already done.
+	var ckpt int
+	if err := ix.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE k LIKE 'ckpt:%'`).Scan(&ckpt); err != nil {
+		t.Fatal(err)
+	}
+	if ckpt != 0 {
+		t.Errorf("%d checkpoints survived the rebuild; sessions would never be re-indexed", ckpt)
+	}
+	hits, err := ix.Search("hello", SearchOpts{Limit: 5})
+	if err != nil || len(hits) == 0 {
+		t.Errorf("upgraded index does not search: %v, %d hits", err, len(hits))
 	}
 }

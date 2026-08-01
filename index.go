@@ -199,6 +199,17 @@ func bootstrap(db *sql.DB) error {
 //     recorded; the delete falls back to the old scan for those and records a
 //     range on the way through, so the index heals itself as sessions are
 //     touched. No migration step and no forced rescan.
+//
+// tableExists reports whether a table is present, so a shape check can tell
+// "wrong shape" from "not created yet".
+func tableExists(db *sql.DB, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?`,
+		name).Scan(&n)
+	return n > 0, err
+}
+
 func migrateSchema(db *sql.DB) error {
 	var version string
 	_ = db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version)
@@ -250,8 +261,44 @@ func migrateSchema(db *sql.DB) error {
 		}
 		dirty = true
 	}
+	// Whatever the version numbers say, the FTS table has to have every column
+	// this build writes. Enumerating version transitions one by one missed the
+	// v5->v6 `tail` column: the marker was set to 6, the table stayed at 5, and
+	// because the marker then matched, nothing ever noticed. Every later ingest
+	// failed with "table messages_fts has no column named tail" while the index
+	// still looked current — silent and permanent. Check the shape instead of
+	// trusting the number.
+	// On a fresh database the table does not exist yet; bootstrap creates it
+	// immediately after this runs, already at the current shape.
+	exists, err := tableExists(db, "messages_fts")
+	if err != nil {
+		return err
+	}
+	for _, col := range []string{"text", "tail"} {
+		if !exists {
+			break
+		}
+		has, err := tableHasColumn(db, "messages_fts", col)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := db.Exec(`DROP TABLE messages_fts`); err != nil {
+				return fmt.Errorf("rebuild messages_fts (missing %s): %w", col, err)
+			}
+			// msg_ranges points at rowids that no longer exist.
+			if _, err := db.Exec(`DELETE FROM msg_ranges`); err != nil {
+				return err
+			}
+			dirty = true
+			break
+		}
+	}
+
 	if dirty {
 		// FTS was wiped — force a full reindex by clearing per-adapter checkpoints.
+		// Without this the checkpoints say the work is done and the rebuilt table
+		// stays empty.
 		if _, err := db.Exec(`DELETE FROM meta WHERE k LIKE 'ckpt:%'`); err != nil {
 			return err
 		}
