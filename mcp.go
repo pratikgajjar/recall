@@ -485,7 +485,7 @@ func mcpTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query":      strSchema("Concrete identifiers, error strings or feature names work best."),
+					"query":      strSchema("Concrete identifiers, error strings or feature names work best. Omit to list recent sessions instead."),
 					"session_id": strSchema("Search within one session; '.' = current session (recovers what was said before a compaction)."),
 					"context":    map[string]any{"type": "integer", "description": "Expand each hit with N messages either side (grep -C): find and read in ONE call. Top 3 hits."},
 					"repo":       repo,
@@ -494,7 +494,6 @@ func mcpTools() []map[string]any {
 					"limit":      limit,
 					"tags":       tagsFilter,
 				},
-				"required": []string{"query"},
 			},
 		},
 		{
@@ -514,20 +513,12 @@ func mcpTools() []map[string]any {
 				},
 			},
 		},
-		{
-			"name":        "recall_sessions",
-			"description": "List recent past AI sessions (titles + ids, no bodies). Filter by repo/source/since, or by tags applied with recall_tag.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"repo":   repo,
-					"source": source,
-					"since":  since,
-					"limit":  limit,
-					"tags":   tagsFilter,
-				},
-			},
-		},
+		// recall_sessions is deliberately not advertised. It was Search("") with
+		// the same filters — the same capability recall_search gives when the
+		// query is omitted — and every tool schema is re-sent on every turn,
+		// whether or not it is used. It cost 771 characters a turn, 19% of the
+		// schema, and was called 0 times in 418 real calls. The handler is kept
+		// so anything already calling it keeps working.
 		{
 			"name":        "recall_related",
 			"description": "Given a session id, find other past sessions covering the same topic.",
@@ -542,7 +533,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "recall_tag",
-			"description": "Durable bookmarks on past sessions; survive index rebuilds. Filter by them with the 'tags' arg on recall_search/recall_sessions.",
+			"description": "Durable bookmarks on past sessions; survive index rebuilds. Filter by them with the 'tags' arg on recall_search.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

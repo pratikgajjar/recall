@@ -299,10 +299,12 @@ export default function recallExtension(pi: ExtensionAPI) {
   // --- recall_search ---
 
   const searchSchema = Type.Object({
-    query: Type.String({
-      description:
-        "Concrete identifiers, error strings or feature names work best.",
-    }),
+    query: Type.Optional(
+      Type.String({
+        description:
+          "Concrete identifiers, error strings or feature names work best. Omit to list recent sessions instead.",
+      }),
+    ),
     repo: Type.Optional(Type.String({ description: REPO_HELP })),
     source: Type.Optional(Type.String({ description: SOURCE_HELP })),
     since: Type.Optional(Type.String({ description: SINCE_HELP })),
@@ -352,7 +354,7 @@ export default function recallExtension(pi: ExtensionAPI) {
       // through --json. This is the one-call "find it and show me" path.
       if (params.context && params.context > 0) {
         const res = await runRecall(
-          ["find", params.query, "--context", String(params.context), ...scope, ...filters],
+          ["find", params.query ?? "", "--context", String(params.context), ...scope, ...filters],
           signal,
         );
         if (!res.ok) throw new Error(res.stderr || `recall exited with code ${res.code}`);
@@ -363,7 +365,7 @@ export default function recallExtension(pi: ExtensionAPI) {
       }
 
       const res = await runRecall(
-        ["find", params.query, "--json", ...scope, ...filters],
+        ["find", params.query ?? "", "--json", ...scope, ...filters],
         signal,
       );
       if (!res.ok) throw new Error(res.stderr || `recall exited with code ${res.code}`);
@@ -491,58 +493,10 @@ export default function recallExtension(pi: ExtensionAPI) {
     },
   });
 
-  // --- recall_sessions ---
-
-  const sessionsSchema = Type.Object({
-    repo: Type.Optional(Type.String({ description: REPO_HELP })),
-    source: Type.Optional(Type.String({ description: SOURCE_HELP })),
-    since: Type.Optional(Type.String({ description: SINCE_HELP })),
-    tags: Type.Optional(Type.Array(Type.String(), { description: TAGS_HELP })),
-    limit: Type.Optional(
-      Type.Number({ description: `Max sessions (default ${DEFAULT_SESSIONS_LIMIT})` }),
-    ),
-  });
-
-  pi.registerTool({
-    name: "recall_sessions",
-    label: "recall sessions",
-    description:
-      "List recent past AI sessions (titles + ids, no bodies). Filter by repo/source/since. Use to browse what you've worked on, then recall_transcript to open one.",
-    promptSnippet: "List recent past AI sessions",
-    promptGuidelines: [
-      "Use recall_sessions with repo: '.' to see recent prior conversations in the current project.",
-    ],
-    parameters: sessionsSchema,
-
-    async execute(_id, params, signal) {
-      const args = ["sessions", "--json", ...buildFilterArgs({
-        repo: params.repo,
-        source: params.source,
-        since: params.since,
-        tags: params.tags,
-        limit: params.limit ?? DEFAULT_SESSIONS_LIMIT,
-      })];
-      const res = await runRecall(args, signal);
-      if (!res.ok) throw new Error(res.stderr || `recall exited with code ${res.code}`);
-      const hits = parseHits(res.stdout);
-      return {
-        content: [{ type: "text", text: formatHits(hits, false) }],
-        details: { count: hits.length },
-      };
-    },
-
-    renderCall(args, theme, context) {
-      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      let c = theme.fg("toolTitle", theme.bold("recall sessions"));
-      if (args?.repo) c += theme.fg("toolOutput", ` in ${args.repo}`);
-      if (args?.source) c += theme.fg("muted", ` [${args.source}]`);
-      text.setText(c);
-      return text;
-    },
-    renderResult(result, options, theme, context) {
-      return renderTextResult(result, options, theme, context, 20);
-    },
-  });
+  // recall_sessions is not registered: it was Search("") with the same
+  // filters, which is what recall_search does when the query is omitted. Every
+  // tool schema is re-sent on every turn whether or not it is used, and this one
+  // cost ~770 characters a turn for a tool called 0 times in 418 real calls.
 
   // --- recall_related ---
 

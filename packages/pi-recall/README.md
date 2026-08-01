@@ -38,7 +38,6 @@ pi -e ./packages/pi-recall/src/index.ts
 | --- | --- |
 | `recall_search` | Full-text search over past sessions. Returns ranked hits with `session_id` + `msg_idx`. Pass `session_id` to search *inside* one session; add `context` to read the surrounding messages in the same call. |
 | `recall_transcript` | Read a session — by `session_id`, or omit it for the most recent (filterable by repo/source/since). |
-| `recall_sessions` | List recent sessions (titles + ids, no bodies). |
 | `recall_related` | Given a session id, find other sessions on the same topic. |
 | `recall_tag` | Durable bookmarks: `action: add` (default) \| `remove` \| `list`. Tags survive index rebuilds. |
 

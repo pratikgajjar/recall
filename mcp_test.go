@@ -80,10 +80,14 @@ func TestMCPToolsList(t *testing.T) {
 	for _, tt := range tools {
 		names[tt.(map[string]any)["name"].(string)] = true
 	}
-	for _, want := range []string{"recall_search", "recall_transcript", "recall_sessions", "recall_related"} {
+	for _, want := range []string{"recall_search", "recall_transcript", "recall_related", "recall_tag"} {
 		if !names[want] {
 			t.Errorf("missing tool %q (have %v)", want, names)
 		}
+	}
+	// recall_sessions is intentionally absent — see TestSessionsIsFoldedIntoSearch.
+	if names["recall_sessions"] {
+		t.Error("recall_sessions is advertised again; every schema costs a turn")
 	}
 }
 
@@ -199,5 +203,62 @@ func TestTagToolActions(t *testing.T) {
 		if _, err := srv.runTool(ctx, gone, toolArgs{}); err == nil {
 			t.Errorf("%s should no longer be a tool", gone)
 		}
+	}
+}
+
+// Every tool schema is re-sent on every turn, used or not. recall_sessions was
+// Search("") with the same filters — the same thing recall_search does when the
+// query is omitted — and cost 771 characters a turn, 19% of the schema, for a
+// tool called 0 times in 418 real calls. It is no longer advertised; the handler
+// stays so anything already calling it keeps working.
+func TestSessionsIsFoldedIntoSearch(t *testing.T) {
+	ix := newTestIndex(t)
+	if err := ix.IngestBatch(context.Background(), "pi",
+		[]Session{{Source: "pi", SourceID: "s1", Title: "a session", MsgCount: 1}},
+		[]Message{{SourceID: "s1", Idx: 0, Role: "user", Text: "hello world"}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := &mcpServer{ix: ix}
+
+	tools := mcpTools()
+	var names []string
+	for _, tl := range tools {
+		names = append(names, tl["name"].(string))
+	}
+	for _, n := range names {
+		if n == "recall_sessions" {
+			t.Error("recall_sessions is advertised again; it costs every turn")
+		}
+	}
+
+	// query must be optional, or omitting it is a schema violation.
+	for _, tl := range tools {
+		if tl["name"] != "recall_search" {
+			continue
+		}
+		schema := tl["inputSchema"].(map[string]any)
+		if req, ok := schema["required"]; ok {
+			for _, r := range req.([]string) {
+				if r == "query" {
+					t.Error("query is still required; browsing recent sessions is impossible")
+				}
+			}
+		}
+	}
+
+	// Both routes work and agree.
+	browse, err := srv.runTool(context.Background(), "recall_search", toolArgs{})
+	if err != nil {
+		t.Fatalf("search with no query: %v", err)
+	}
+	legacy, err := srv.runTool(context.Background(), "recall_sessions", toolArgs{})
+	if err != nil {
+		t.Fatalf("the kept handler broke: %v", err)
+	}
+	if browse != legacy {
+		t.Error("omitting the query should give exactly what recall_sessions gave")
+	}
+	if !strings.Contains(browse, "a session") {
+		t.Errorf("browse returned nothing useful: %q", browse)
 	}
 }

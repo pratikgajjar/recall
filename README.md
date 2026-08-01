@@ -65,7 +65,7 @@ Pure Go, no CGO. Builds a single static binary.
 
 `recall mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server over stdio, so any MCP-capable harness can search your past chats. It
-exposes `recall_search`, `recall_transcript`, `recall_sessions`, `recall_related`
+exposes `recall_search` (omit the query to browse recent sessions), `recall_transcript`, `recall_related`
 and `recall_tag` (`action: add|remove|list`), and keeps the index warm in the
 background. The tool schema is deliberately terse — it is re-sent on every
 agent turn, so prose there is a recurring cost.
