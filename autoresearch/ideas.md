@@ -454,3 +454,38 @@ of 90 is well inside binomial noise (σ ≈ 4.3). Left at 0.25: moving a constan
 for a noise-level gain is fitting the benchmark, not improving the tool. Worth
 revisiting only with a deep-retrieval sample large enough to resolve a few
 points, which this corpus can support if the probe is made cheaper.
+
+## Rejected with evidence: collapsing identical search hits
+
+A search for "connection pool timeout" returned two hits with the same title,
+the same msg_idx and a byte-identical snippet, from two session ids a minute
+apart. The corpus is full of this: **23.6% of sessions are exact copies of
+another** — an automation that re-ran the same task, each run writing an
+identical transcript under a new id. Two such sessions were verified 23/23 rows
+identical.
+
+Collapsing hits that share (title, snippet, msg_idx), with over-fetch so
+distinct results backfill, looked like a clear win: it claimed to remove 14.9%
+of all result rows.
+
+The ranking gate rejected it — MRR -5.6%, found -2, rank@3 -2.
+
+The obvious explanation is that the gate's ground truth points at one particular
+copy, so collapsing hides the id it expects. That was checked and is false: only
+**1 of 42** sessions agents actually read has a same-title twin. The change was
+hiding real answers, not twins.
+
+The signature was the bug. `snippet` is generated from the query match, so two
+unrelated sessions quoting the same error line produce identical snippets. With
+a true content fingerprint — sha256 over every indexed message of a session —
+the redundancy in real results is:
+
+    exact-copy rows in real results: 0 of 442 (0.0%), 0 of 120 searches affected
+
+So the duplication is real in the corpus and never reaches a result page. The
+whole 14.9% was coincidental snippet collisions between distinct sessions.
+
+Worth remembering: a cheap similarity signature measured something 15x larger
+than the real effect, and in the opposite direction of useful. If this is
+revisited — for index size rather than search cost — dedupe at ingest on a
+content fingerprint, never on rendered output.
