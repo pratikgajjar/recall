@@ -82,3 +82,10 @@ const (
 // so windowing the tail was a silent no-op on every source. The bound remains
 // only to keep a pasted megabyte out of memory.
 const indexTextMax = maxChunks * excerptMax
+
+// When per-session collapsing leaves a search short of what was asked for, the
+// pool is widened and read again.
+const (
+	poolGrowthFactor = 4
+	poolGrowthSteps  = 2
+)

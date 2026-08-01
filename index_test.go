@@ -742,3 +742,61 @@ func TestSplitForIndexKeepsTailSearchable(t *testing.T) {
 		t.Errorf("got %d tail windows, maxChunks is %d", len(tl), maxChunks)
 	}
 }
+
+// Rows collapse to one hit per session, and the pool that gets ranked can be
+// dominated by a few talkative sessions: a search for 15 came back with 6 while
+// 30 other sessions matched every term. The caller cannot work around that —
+// asking for more returns the same few — so the pool is widened until the page
+// is full or the matches genuinely run out.
+func TestSearchDeliversTheLimitWhenMatchesExist(t *testing.T) {
+	ix := newTestIndex(t)
+	ctx := context.Background()
+	var sessions []Session
+	var msgs []Message
+
+	// Two sessions that mention the term constantly, and would otherwise fill
+	// any pool ranked by row.
+	for s := 0; s < 2; s++ {
+		id := fmt.Sprintf("loud-%d", s)
+		sessions = append(sessions, Session{Source: "pi", SourceID: id,
+			Project: "/w", Title: "loud", MsgCount: 400})
+		for i := 0; i < 400; i++ {
+			msgs = append(msgs, Message{SourceID: id, Idx: i, Role: "user",
+				Text: fmt.Sprintf("kryptonite mentioned again and again, line %d", i)})
+		}
+	}
+	// Plenty of quiet sessions that mention it once.
+	for s := 0; s < 30; s++ {
+		id := fmt.Sprintf("quiet-%d", s)
+		sessions = append(sessions, Session{Source: "pi", SourceID: id,
+			Project: "/w", Title: fmt.Sprintf("quiet %d", s), MsgCount: 1})
+		msgs = append(msgs, Message{SourceID: id, Idx: 0, Role: "user",
+			Text: fmt.Sprintf("kryptonite appears here once, in session %d", s)})
+	}
+	if err := ix.IngestBatch(ctx, "pi", sessions, msgs); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := ix.Search("kryptonite", SearchOpts{Limit: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) < 15 {
+		t.Errorf("asked for 15 and got %d, with 32 sessions matching", len(hits))
+	}
+	seen := map[string]bool{}
+	for _, h := range hits {
+		if seen[h.SessionID] {
+			t.Errorf("session %s returned twice", h.SessionID)
+		}
+		seen[h.SessionID] = true
+	}
+	// And it must still stop when the matches really are exhausted.
+	few, err := ix.Search("kryptonite", SearchOpts{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(few) > 32 {
+		t.Errorf("got %d hits from 32 sessions", len(few))
+	}
+}

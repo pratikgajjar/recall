@@ -865,13 +865,22 @@ LIMIT ?`
 
 // scanHits reads result rows and collapses them the way the caller expects.
 func (ix *Index) scanHits(rows *sql.Rows, opts SearchOpts) ([]Hit, error) {
+	hits, _, err := ix.scanHitsCounted(rows, opts)
+	return hits, err
+}
+
+// scanHitsCounted also reports how many rows it read, so a caller can tell a
+// short result from a truncated one.
+func (ix *Index) scanHitsCounted(rows *sql.Rows, opts SearchOpts) ([]Hit, int, error) {
 	var hits []Hit
+	scanned := 0
 	seen := map[string]int{}
 	for rows.Next() {
+		scanned++
 		var h Hit
 		if err := rows.Scan(&h.SessionID, &h.Source, &h.SourceID, &h.Project, &h.Title,
 			&h.StartedAt, &h.MsgIdx, &h.Role, &h.Snippet, &h.Rank); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		// Collapsing to one hit per session is right when ranking sessions against
 		// each other. Inside a single session it is wrong: the caller has already
@@ -890,7 +899,7 @@ func (ix *Index) scanHits(rows *sql.Rows, opts SearchOpts) ([]Hit, error) {
 		seen[key] = len(hits)
 		hits = append(hits, h)
 	}
-	return hits, rows.Err()
+	return hits, scanned, rows.Err()
 }
 
 // filtered reports whether the caller narrowed the search to a subset of
@@ -951,12 +960,31 @@ SELECT id, source, source_id, project, title, started_at, idx, role, snippet, ra
 )
 ORDER BY (rank * 1.0) - (started_at / 1.0e13) ASC
 LIMIT ?`
-	rows, err := ix.db.Query(q, ftsQuery, pool, ftsQuery, pool, limit)
-	if err != nil {
-		return nil, err
+	// Rows collapse to one hit per session, and a pool can be dominated by a
+	// handful of talkative sessions: a search for 15 came back with 6 while 30
+	// other sessions matched every term. When that happens, look deeper rather
+	// than under-deliver — the caller asked for more and more exists.
+	for attempt := 0; ; attempt++ {
+		rows, err := ix.db.Query(q, ftsQuery, pool, ftsQuery, pool, pool)
+		if err != nil {
+			return nil, err
+		}
+		hits, scanned, err := ix.scanHitsCounted(rows, opts)
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		// Stop when the page is full, when the matches ran out (a short scan
+		// means there was nothing more to read), or when digging further stops
+		// being worth the scan.
+		if len(hits) >= limit || scanned < pool || attempt >= poolGrowthSteps {
+			if len(hits) > limit {
+				hits = hits[:limit]
+			}
+			return hits, nil
+		}
+		pool *= poolGrowthFactor
 	}
-	defer rows.Close()
-	return ix.scanHits(rows, opts)
 }
 
 func (ix *Index) recent(opts SearchOpts) ([]Hit, error) {

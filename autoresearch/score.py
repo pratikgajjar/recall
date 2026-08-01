@@ -124,10 +124,23 @@ def build_fresh_index(quick):
             os.remove(FRESH_INDEX + suffix)
         except OSError:
             pass
-    t0 = time.perf_counter()
-    subprocess.run([BIN, "index", "--full"], capture_output=True,
-                   env=env, timeout=3600, cwd=REPO)
-    cold = round(time.perf_counter() - t0, 2)
+    # Twice, keep the faster. Back-to-back rebuilds vary by 6% on a quiet
+    # machine but readings across rounds ranged 28s to 49s, because this box
+    # runs other agents: that is contention, not a property of recall. A ±13
+    # point swing on this sub-score is larger than most real improvements, so
+    # the noise has to come out or it decides experiments.
+    cold = None
+    for _ in range(2):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(FRESH_INDEX + suffix)
+            except OSError:
+                pass
+        t0 = time.perf_counter()
+        subprocess.run([BIN, "index", "--full"], capture_output=True,
+                       env=env, timeout=3600, cwd=REPO)
+        run = round(time.perf_counter() - t0, 2)
+        cold = run if cold is None else min(cold, run)
     # The common path: nothing changed since last time.
     t0 = time.perf_counter()
     subprocess.run([BIN, "index"], capture_output=True,
