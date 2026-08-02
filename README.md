@@ -30,7 +30,7 @@ index: ~/.recall/index.sqlite (69.5 MiB)
 
 $ recall "import cycle" --limit 3
 2025-09-02 18:36  cursor  ~/code/acme-api    Fix import cycle in proto files
-    id=cursor:94dc8775-5fd3-41e9-93d7-43d7dff795b6  msg=1  role=assistant
+    id=cursor:a3f21c08-0000-4a1b-9c2d-5e6f70819abc  msg=1  role=assistant
     I'll help you fix the «import» «cycle» in the request logging…
 
 $ recall last --repo ~/code/acme-api | claude -p "continue this"

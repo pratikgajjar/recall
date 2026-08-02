@@ -578,11 +578,11 @@ func TestTrimTextStripsCodexCallArgs(t *testing.T) {
 func TestMissingSessionErrorIsActionable(t *testing.T) {
 	ix := newTestIndex(t)
 	if err := ix.IngestBatch(context.Background(), "pi",
-		[]Session{{Source: "pi", SourceID: "019f6df5-70b0-7cfa-ad5f-328d2876b7d3", Title: "t", MsgCount: 1}},
-		[]Message{{SourceID: "019f6df5-70b0-7cfa-ad5f-328d2876b7d3", Idx: 0, Role: "user", Text: "hello"}}); err != nil {
+		[]Session{{Source: "pi", SourceID: "019fdead-beef-7000-8000-000000000001", Title: "t", MsgCount: 1}},
+		[]Message{{SourceID: "019fdead-beef-7000-8000-000000000001", Idx: 0, Role: "user", Text: "hello"}}); err != nil {
 		t.Fatal(err)
 	}
-	full := "pi:019f6df5-70b0-7cfa-ad5f-328d2876b7d3"
+	full := "pi:019fdead-beef-7000-8000-000000000001"
 
 	// Never leak the driver's error.
 	for _, id := range []string{full[:len(full)-4], "pi:nope", "pi:0"} {
@@ -601,8 +601,8 @@ func TestMissingSessionErrorIsActionable(t *testing.T) {
 	// A near-miss id names the session that was meant — both a lost tail and a
 	// dropped character in the middle.
 	for _, typo := range []string{
-		"pi:019f6df5-70b0-7cfa-ad5f-328d2876",   // truncated
-		"pi:019f6df5-70b0-7cfa-ad5f-328d2876b3", // characters dropped mid-id
+		"pi:019fdead-beef-7000-8000-0000000",   // truncated
+		"pi:019fdead-beef-7000-8000-0000000b3", // characters dropped mid-id
 	} {
 		_, err := ix.LookupSession(typo)
 		if err == nil || !strings.Contains(err.Error(), full) {

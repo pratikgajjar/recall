@@ -341,7 +341,7 @@ func TestLuaParityClaudeIncremental(t *testing.T) {
 // file mtime (the transcript has no per-event timestamps).
 func TestLuaCursorAgent(t *testing.T) {
 	root := t.TempDir()
-	sid := "d695b628-e3d7-4e61-a12a-b3e1559f10a1"
+	sid := "b7c04e91-0000-4d2e-8a3f-1c5b90247def"
 	path := filepath.Join(root, "tmp-cursor-sandbox", "agent-transcripts", sid, sid+".jsonl")
 	writeLines(t, path,
 		`{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Friday, Apr 24, 2026, 1:10 PM (UTC-7)</timestamp> <user_query>\nCreate hello.txt\n</user_query>"}]}}`,
