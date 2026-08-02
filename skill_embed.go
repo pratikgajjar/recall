@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // embeddedSkill bundles the agent skill into the binary. It is installed by
@@ -82,6 +83,15 @@ func runSkill(args []string) error {
 	body := skillContent()
 	targets := []string{}
 	if len(args) > 1 {
+		// The optional argument is a directory. Anything that looks like a flag
+		// is a mistake — `recall skill install --force` created a directory
+		// named "--force" and wrote the skill into it, which then took a commit
+		// and broke every shell loop that iterated over the repo's files.
+		if strings.HasPrefix(args[1], "-") {
+			return fmt.Errorf("recall skill install takes a directory, not %q\n"+
+				"  recall skill install                       # every installed copy\n"+
+				"  recall skill install ~/.claude/skills/recall", args[1])
+		}
 		targets = append(targets, args[1])
 	} else {
 		for _, s := range installedSkills() {

@@ -68,3 +68,24 @@ func TestSkillUsageErrors(t *testing.T) {
 		t.Error("unknown subcommand should error")
 	}
 }
+
+// `recall skill install --force` created a directory named "--force", wrote the
+// skill into it, and the next `git add -A` committed it. A path starting with a
+// dash then breaks any shell loop over the repo's files — `cat` and `file` both
+// read it as an option.
+func TestSkillInstallRejectsFlagAsDirectory(t *testing.T) {
+	for _, arg := range []string{"--force", "-f", "--dir=/tmp/x"} {
+		err := runSkill([]string{"install", arg})
+		if err == nil {
+			t.Errorf("skill install %q was accepted as a directory", arg)
+			continue
+		}
+		if !strings.Contains(err.Error(), "directory") {
+			t.Errorf("error for %q should say what the argument is for: %v", arg, err)
+		}
+		if _, statErr := os.Stat(arg); statErr == nil {
+			os.RemoveAll(arg)
+			t.Errorf("skill install %q created it on disk", arg)
+		}
+	}
+}
