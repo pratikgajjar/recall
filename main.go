@@ -135,6 +135,18 @@ func main() {
 		if err := runRelated(args); err != nil {
 			fatal(err)
 		}
+	case "mcp":
+		// Removed in v0.7.0. Without this the word falls through to search, so a
+		// client that was configured with `claude mcp add recall -- recall mcp`
+		// pipes JSON-RPC in and gets ranked search results back — no error, just
+		// an integration that quietly does nothing.
+		fmt.Fprintln(os.Stderr, "recall: the MCP server was removed in v0.7.0.")
+		fmt.Fprintln(os.Stderr, "  recall is a CLI now; agents run it directly and the skill tells them how:")
+		fmt.Fprintln(os.Stderr, "    recall skill install                   # into every installed skill dir")
+		fmt.Fprintln(os.Stderr, "    npx skills add pratikgajjar/recall     # or via the skills CLI")
+		fmt.Fprintln(os.Stderr, "  Remove the recall entry from your MCP config.")
+		fmt.Fprintln(os.Stderr, "  Searching for the word: recall find mcp")
+		os.Exit(2)
 	case "tag":
 		if err := runTag(args); err != nil {
 			fatal(err)
