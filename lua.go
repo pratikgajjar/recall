@@ -251,6 +251,9 @@ func (p luaLineParse) session(source, sourceID string) Session {
 	if title == "" {
 		title = titleFromPrompt(p.firstUser)
 	}
+	if source == "cursor-agent" {
+		title = cursorSidebarTitle(loadCursorChatTitleMap(defaultCursorChatsRoot()), sourceID, title)
+	}
 	s := p.usage // Model/Tokens/Cache/Cost/Chars
 	s.Source, s.SourceID = source, sourceID
 	s.Project, s.Title = p.project, title

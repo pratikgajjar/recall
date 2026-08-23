@@ -221,7 +221,7 @@ for r in csv.DictReader(open('u-models.csv')):
 | Claude Code | `~/.claude/projects/<sanitized-cwd>/*.jsonl` | One file per session, append-only JSONL |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | First line is `session_meta`; rest are `response_item` payloads |
 | pi | `~/.pi/agent/sessions/<sanitized-cwd>/*.jsonl` | First line is the `session` event; rest are `message` events |
-| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | `{role, message:{content:[parts]}}` per line; no per-event timestamps, so sessions are dated by file mtime |
+| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | `{role, message:{content:[parts]}}` per line; no per-event timestamps, so sessions are dated by file mtime. Title prefers `~/.cursor/chats/<workspace>/<id>/meta.json` (sidebar name); first user prompt is the fallback |
 
 The index lives at `~/.recall/index.sqlite`. It contains:
 

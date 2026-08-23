@@ -1,6 +1,10 @@
 -- cursor-agent.lua — index Cursor Agent CLI sessions
 -- (~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl).
 --
+-- Sidebar titles live in ~/.cursor/chats/<workspace>/<id>/meta.json. Lua
+-- cannot read that tree (no I/O); the Go host overlays the title after
+-- line() returns. Keep this file a transcript transform only.
+--
 -- The on-disk format is JSONL with one record per turn:
 --   {"role":"user"|"assistant", "message":{"content":[ <parts...> ]}}
 -- where each part is one of:
