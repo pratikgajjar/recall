@@ -20,6 +20,9 @@ import (
 // Lua-tier example and override template.
 type CursorAgentAdapter struct {
 	Root string // ~/.cursor/projects
+	// ChatsRoot is ~/.cursor/chats. Each session id has meta.json with the
+	// sidebar title Cursor shows in the UI. Empty means defaultCursorChatsRoot.
+	ChatsRoot string
 	// batchSessions caps sessions per ingest batch (0 = default). Test-only.
 	batchSessions int
 }
@@ -53,6 +56,7 @@ func (a *CursorAgentAdapter) ScanStream(ctx context.Context, prev string, emit E
 	prevMap := parseFileCkpt(prev)
 	nextMap := map[string]fileState{}
 	be := newBatchEmitter(emit, func() string { return encodeFileCkpt(nextMap) }, a.batchSessions)
+	chatTitles := loadCursorChatTitleMap(a.chatsRoot())
 
 	err := filepath.WalkDir(a.Root, func(path string, d fs.DirEntry, err error) error {
 		if cErr := ctx.Err(); cErr != nil {
@@ -95,7 +99,8 @@ func (a *CursorAgentAdapter) ScanStream(ctx context.Context, prev string, emit E
 		}
 		return be.add(Session{
 			Source: "cursor-agent", SourceID: sid,
-			Project: cursorAgentSlug(path), Title: titleFromPrompt(p.firstUser),
+			Project:   cursorAgentSlug(path),
+			Title:     cursorSidebarTitle(chatTitles, sid, titleFromPrompt(p.firstUser)),
 			StartedAt: mtimeMs, EndedAt: mtimeMs, MsgCount: len(p.msgs), Chars: p.chars,
 		}, p.msgs)
 	})
@@ -253,4 +258,11 @@ func stripCursorAgentWrappers(s string) string {
 	s = strings.ReplaceAll(s, "<user_query>", "")
 	s = strings.ReplaceAll(s, "</user_query>", "")
 	return strings.TrimSpace(s)
+}
+
+func (a *CursorAgentAdapter) chatsRoot() string {
+	if a.ChatsRoot != "" {
+		return a.ChatsRoot
+	}
+	return defaultCursorChatsRoot()
 }
