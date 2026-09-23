@@ -46,7 +46,7 @@ USAGE
   recall sessions [flags]          list sessions, no body
   recall related <session-id>      sessions covering the same topic as this one
   recall tag                       list all tags + counts (git-tag style)
-  recall tag <session-id> <tag>…   attach durable tags (survive reindex)
+  recall tag <session-id|.> <tag>… attach durable tags (. = current Pi session)
   recall tag -d <session-id> <tag>…  remove tags
   recall tag -l [session-id]       list all tags, or one session's tags
   recall open <session-id>         reopen in the source tool (cursor://, claude --resume, …)
@@ -71,7 +71,8 @@ EXAMPLES
   recall last --repo .                                # most recent here, full
   recall related cursor:bc9f2a9b-…                    # neighbour topics
   recall stats --since 7d                             # what did I work on this week?
-  recall tag pi:019ed75b-… deploy-rca                 # remember this session
+  recall tag . deploy-rca                              # tag this Pi session
+  recall tag pi:019ed75b-… deploy-rca                 # tag another session
   recall sessions --tag deploy-rca                    # find tagged sessions
   recall sessions --tag source:cursor --tag deploy-rca  # facet + tag, AND
 
@@ -471,6 +472,10 @@ func runTag(args []string) error {
 		return err
 	}
 	defer ix.Close()
+	id, err = resolveSessionID(ix, id)
+	if err != nil {
+		return err
+	}
 
 	if *del {
 		removed, err := ix.RemoveTags(id, tags)
@@ -506,7 +511,11 @@ func listTags(pos []string, asJSON bool) error {
 	defer ix.Close()
 
 	if len(pos) > 0 {
-		tags, err := ix.SessionTags(pos[0])
+		id, err := resolveSessionID(ix, pos[0])
+		if err != nil {
+			return err
+		}
+		tags, err := ix.SessionTags(id)
 		if err != nil {
 			return err
 		}
@@ -774,30 +783,22 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
 }
 
-// resolveSessionDot turns SessionID "." into the newest indexed session for
-// the current repo (falling back to newest anywhere), so `recall find --in .`
-// means "search inside the session I am in right now" — the on-disk transcript
-// survives context compaction, so this recovers what the agent forgot.
-func resolveSessionDot(ix *Index, opts *SearchOpts) error {
-	if opts.SessionID != "." {
-		return nil
+// resolveSessionID resolves "." to the calling Pi session, not the newest
+// session in the cwd (which can belong to a different agent). Never guess a
+// target for a write such as `recall tag .`: guessing can tag the wrong chat.
+func resolveSessionID(ix *Index, id string) (string, error) {
+	if id != "." {
+		return id, nil
 	}
-	probe := SearchOpts{Limit: 1}
-	if cwd, err := os.Getwd(); err == nil {
-		probe.Project = resolveRepo(cwd)
+	piID := os.Getenv("PI_SESSION_ID")
+	if piID == "" {
+		return "", errors.New("`.` needs PI_SESSION_ID from a Pi shell tool; pass an explicit session ID (find it with `recall sessions`) outside Pi")
 	}
-	hits, err := ix.Search("", probe)
-	if err == nil && len(hits) == 0 && probe.Project != "" {
-		hits, err = ix.Search("", SearchOpts{Limit: 1})
+	id = "pi:" + piID
+	if _, err := ix.LookupSession(id); err != nil {
+		return "", fmt.Errorf("current Pi session %s is not indexed — run `recall index` (or pass an explicit session ID): %w", id, err)
 	}
-	if err != nil {
-		return err
-	}
-	if len(hits) == 0 {
-		return fmt.Errorf("no sessions indexed yet")
-	}
-	opts.SessionID = hits[0].SessionID
-	return nil
+	return id, nil
 }
 
 func runFind(args []string) error {
@@ -822,10 +823,11 @@ func runFind(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := resolveSessionDot(ix, &opts); err != nil {
+	defer ix.Close()
+	opts.SessionID, err = resolveSessionID(ix, opts.SessionID)
+	if err != nil {
 		return err
 	}
-	defer ix.Close()
 	hits, err := ix.Search(query, opts)
 	if err != nil {
 		return err

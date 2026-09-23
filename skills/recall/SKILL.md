@@ -43,8 +43,10 @@ recall show cursor:94dc8775-… --range N-5:N+5            # read just that wind
 
 Measured over real navigations in this repo's own history: searching inside a
 session costs ~400 characters against ~4,000 to outline it — about 10x less for
-the same landing spot. `--in .` scopes to the current session, which is how you
-recover something said before a compaction.
+the same landing spot. `--in .` uses `PI_SESSION_ID` from Pi's shell tool to
+scope to the **actual** current session, not the latest chat in the repo. Run
+`recall index` if it is not indexed yet; outside Pi, pass an explicit ID.
+This recovers something said before a compaction.
 
 Outline is for a session you know **nothing** about:
 
@@ -67,11 +69,15 @@ characters) and you will get the first page of it.
 Tags survive `recall index --full` (stored apart from the disposable index).
 
 ```bash
-recall tag cursor:94dc8775-… deploy-rca   # remember this session
+recall tag . deploy-rca                  # current Pi session (in a Pi shell tool)
+recall tag cursor:94dc8775-… deploy-rca # another session (explicit ID)
 recall tag                                # list all tags + counts
 recall tag -d <id> <tag>                  # remove   |  -l [id]  list
 recall sessions --tag deploy-rca          # filter by tag
 ```
+
+`.` requires `PI_SESSION_ID`; it never guesses based on cwd or recency. To
+tag an earlier/different session, use the ID from `recall sessions` or `find`.
 
 `--tag` is the one filter selector (repeatable, AND). `source` is a reserved
 **facet** on it — filter with `--tag source:cursor` (no separate `--source`

@@ -105,7 +105,7 @@ recall sessions [--repo P]         list recent sessions
 recall related <session-id>        sessions on the same topic
 recall open <session-id>           reopen in the source tool (cursor://, claude --resume, …)
 recall tag                         list all tags + counts (git-tag style)
-recall tag <session-id> <tag>…     attach durable tags (survive reindex)
+recall tag <session-id|.> <tag>…   attach durable tags (. = current Pi session)
 recall tag -d <session-id> <tag>…  remove tags
 recall stats [flags]               sessions/messages/tokens/cost by source, project, model
 recall index [--full] [--prune]    (re)build the index; --prune drops sessions
@@ -145,7 +145,8 @@ Tag any session to find it again later — tags are **durable**: they live in a
 separate table the indexer never rebuilds, so they survive `recall index --full`.
 
 ```bash
-recall tag cursor:94dc8775-… deploy-rca auth-design   # remember this session
+recall tag . deploy-rca                           # current Pi session (Pi shell tool)
+recall tag cursor:94dc8775-… deploy-rca auth-design # another session by ID
 recall sessions --tag deploy-rca                      # find tagged sessions
 recall sessions --tag deploy-rca --tag source:cursor  # tag + facet, AND
 ```
@@ -155,6 +156,10 @@ recall sessions --tag deploy-rca --tag source:cursor  # tag + facet, AND
 k8s-label style. Reserved facets are derived from the session, so you can filter
 by them but can't author them as tags. Agents can tag with `recall tag` the
 tool to bookmark sessions worth remembering.
+
+`.` resolves via Pi's `PI_SESSION_ID`, never by guessing the newest chat in the
+current directory. If not running from a Pi shell tool, pass an explicit ID.
+If the current session isn't indexed, run `recall index` and retry.
 
 ### Tokens and cost
 
