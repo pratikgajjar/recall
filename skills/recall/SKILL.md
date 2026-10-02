@@ -17,8 +17,8 @@ If `recall` is missing or the index is stale, run `recall index` (incremental,
 recall find "import cycle proto" --limit 5   # ranked hits; --json to parse
 recall show cursor:94dc8775-…                # full transcript of a hit
 recall last --repo .                          # most recent session in THIS repo
-recall memory "deploy policy"                 # saved memories only (top 5)
-recall skill github                           # print an installed skill by name
+recall memory "deploy policy"                 # = find --tag source:memory
+recall skill github                           # exact skill name prints the skill
 ```
 
 Each hit gives a `session_id` and a `msg` index at the matched message.

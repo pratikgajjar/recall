@@ -103,8 +103,7 @@ recall last [--repo P]             full transcript of the most recent matching s
 recall show <session-id>           full transcript of one session
 recall sessions [--repo P]         list recent sessions
 recall related <session-id>        sessions on the same topic
-recall memory [terms]              search memory files (find --tag source:memory --limit 5)
-recall skill <name>                print an installed agent skill (project copy first)
+recall memory|skill [terms]        find in that source; an exact title prints it
 recall open <session-id>           reopen in the source tool (cursor://, claude --resume, …)
 recall tag                         list all tags + counts (git-tag style)
 recall tag <session-id|.> <tag>…   attach durable tags (. = current Pi session)

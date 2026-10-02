@@ -466,6 +466,63 @@ func TestLuaObsidian(t *testing.T) {
 	}
 }
 
+func TestLuaMemoryIndexesTopicsNotGeneratedIndex(t *testing.T) {
+	root := t.TempDir()
+	writeLines(t, filepath.Join(root, "MEMORY.md"), "# generated index", "- feedback.md")
+	topic := filepath.Join(root, "feedback.md")
+	writeLines(t, topic, "---", "name: Prefer direct tools", "description: Avoid wrappers", "type: feedback", "---", "", "Use the native CLI.")
+
+	ad := luaAdapterFor(t, "plugins/memory.lua", root)
+	sessions, msgs, _, err := ad.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].SourceID != topic || sessions[0].Title != "Prefer direct tools" {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+	if len(msgs) != 1 || msgs[0].Role != "memory" || !strings.Contains(msgs[0].Text, "Use the native CLI") {
+		t.Fatalf("messages = %+v", msgs)
+	}
+}
+
+func TestLuaSkillIndexesMirroredCatalog(t *testing.T) {
+	root := t.TempDir()
+	original := "/skills/librarian/SKILL.md"
+	base := "/skills/librarian"
+	doc := filepath.Join(root, "librarian.md")
+	writeLines(t, doc,
+		"# librarian",
+		"Source: "+original,
+		"Base: "+base,
+		"Description: Cache remote repository checkouts",
+		"",
+		"Use checkout.sh before inspecting a remote repository.",
+	)
+
+	ad := luaAdapterFor(t, "plugins/skill.lua", root)
+	sessions, msgs, _, err := ad.Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Source != "skill" || sessions[0].SourceID != original {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+	if sessions[0].Title != "librarian" || sessions[0].Project != base {
+		t.Fatalf("skill metadata = %+v", sessions[0])
+	}
+	if len(msgs) != 1 || msgs[0].Role != "skill" || !strings.Contains(msgs[0].Text, "checkout.sh") {
+		t.Fatalf("messages = %+v", msgs)
+	}
+
+	full, err := ad.Fetch(context.Background(), original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) != 1 || !strings.Contains(full[0].Text, "remote repository") {
+		t.Fatalf("fetch = %+v", full)
+	}
+}
+
 // TestMergeAdaptersOverride proves a Lua plugin replaces a built-in of the same
 // id, and that new ids are appended.
 func TestMergeAdaptersOverride(t *testing.T) {

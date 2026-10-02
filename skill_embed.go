@@ -77,11 +77,8 @@ func installedSkills() []skillState {
 // skills/recall/SKILL.md and running install without rebuilding first writes the
 // previous text. `recall doctor` catches that, which is how it was found.
 func runSkill(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: recall skill <name> [--cwd dir] | recall skill install [dir]")
-	}
-	if args[0] != "install" {
-		return runSkillShow(args)
+	if len(args) == 0 || args[0] != "install" {
+		return runSourceAlias("skill", args)
 	}
 	body := skillContent()
 	targets := []string{}

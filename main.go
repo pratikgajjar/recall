@@ -53,8 +53,7 @@ USAGE
   recall stats [flags]             session/message counts by source/project
   recall index [--full]            (re)build the local index from all sources
   recall doctor                    health check
-  recall skill <name>              print an installed agent skill's SKILL.md (project copy first)
-  recall memory [terms]            search memory files (find --tag source:memory --limit 5)
+  recall memory|skill [terms]      find in that source; an exact title prints the document
   recall skill install             refresh installed agent skill copies + source detection
   recall version
 
@@ -111,7 +110,7 @@ func main() {
 			fatal(err)
 		}
 	case "memory":
-		if err := runMemory(args); err != nil {
+		if err := runSourceAlias("memory", args); err != nil {
 			fatal(err)
 		}
 	case "find":
@@ -1424,4 +1423,32 @@ func runSessions(args []string) error {
 	}
 	printPager(os.Stdout, "sessions", "", cf, hits)
 	return nil
+}
+
+// runSourceAlias backs `recall memory` and `recall skill`: find within one
+// source. An exact title, or a search with a single result, prints that
+// document instead of a hit list.
+func runSourceAlias(source string, args []string) error {
+	q := strings.Join(args, " ")
+	if q != "" && !strings.Contains(" "+q, " -") {
+		if ix, err := openIndexRead(defaultIndexPath()); err == nil {
+			var id string
+			_ = ix.db.QueryRow(`SELECT id FROM sessions WHERE source = ? AND title = ?
+				ORDER BY started_at DESC LIMIT 1`, source, q).Scan(&id)
+			// A document can hit twice (title and body), so look at three.
+			hits, _ := ix.Search(q, SearchOpts{Source: source, Limit: 3})
+			docs := map[string]bool{}
+			for _, h := range hits {
+				docs[h.SessionID] = true
+			}
+			if id == "" && len(docs) == 1 {
+				id = hits[0].SessionID
+			}
+			ix.Close()
+			if id != "" {
+				return runShow([]string{id})
+			}
+		}
+	}
+	return runFind(append(args, "--tag", "source:"+source))
 }
