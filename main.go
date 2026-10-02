@@ -54,6 +54,7 @@ USAGE
   recall index [--full]            (re)build the local index from all sources
   recall doctor                    health check
   recall skill <name>              print an installed agent skill's SKILL.md (project copy first)
+  recall memory [terms]            search memory files (find --tag source:memory --limit 5)
   recall skill install             refresh installed agent skill copies + source detection
   recall version
 
@@ -107,6 +108,10 @@ func main() {
 		}
 	case "skill":
 		if err := runSkill(args); err != nil {
+			fatal(err)
+		}
+	case "memory":
+		if err := runMemory(args); err != nil {
 			fatal(err)
 		}
 	case "find":

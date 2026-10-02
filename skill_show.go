@@ -96,6 +96,14 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// refreshIndex re-runs `recall index` once when a lookup misses; tests stub it,
+// since os.Executable() is the test binary there.
+var refreshIndex = func() {
+	if exe, err := os.Executable(); err == nil {
+		_ = exec.Command(exe, "index").Run()
+	}
+}
+
 func runSkillShow(args []string) error {
 	fs := flag.NewFlagSet("skill", flag.ExitOnError)
 	cwdFlag := fs.String("cwd", "", "resolve project-local skills from this directory (default: current)")
@@ -113,12 +121,10 @@ func runSkillShow(args []string) error {
 	}
 
 	s, ok, err := lookupSkill(name, cwd)
-	if err == nil && !ok {
-		// A skill mirrored on this prompt may not be indexed yet; refresh once.
-		if exe, exeErr := os.Executable(); exeErr == nil {
-			_ = exec.Command(exe, "index").Run()
-			s, ok, err = lookupSkill(name, cwd)
-		}
+	if err != nil || !ok {
+		// A skill mirrored on this prompt, or the whole index, may not exist yet; refresh once.
+		refreshIndex()
+		s, ok, err = lookupSkill(name, cwd)
 	}
 	if err != nil {
 		return err
@@ -137,3 +143,18 @@ func runSkillShow(args []string) error {
 	fmt.Printf("Skill: %s\nBase: %s (resolve relative paths in this skill against Base)\n\n%s", name, base, body)
 	return nil
 }
+
+// recall memory [terms] is `recall find --tag source:memory`, five hits by
+// default: memory lookups are frequent enough to deserve their own verb.
+func memoryFindArgs(args []string) []string {
+	out := append([]string{}, args...)
+	out = append(out, "--tag", "source:memory")
+	for _, a := range args {
+		if a == "--limit" || a == "-limit" || strings.HasPrefix(a, "--limit=") || strings.HasPrefix(a, "-limit=") {
+			return out
+		}
+	}
+	return append(out, "--limit", "5")
+}
+
+func runMemory(args []string) error { return runFind(memoryFindArgs(args)) }

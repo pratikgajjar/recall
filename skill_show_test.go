@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestResolveSkillPrefersNearestProjectCopy(t *testing.T) {
 	cands := []Session{
@@ -39,5 +42,18 @@ func TestResolveSkillSkipsMissingFilesAndPicksNewestGlobal(t *testing.T) {
 	}
 	if _, ok := resolveSkill(nil, "/x", exists); ok {
 		t.Fatal("no candidates must not resolve")
+	}
+}
+
+func TestMemoryFindArgsTagsSourceAndDefaultsLimit(t *testing.T) {
+	got := memoryFindArgs([]string{"edit", "tool"})
+	want := []string{"edit", "tool", "--tag", "source:memory", "--limit", "5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	got = memoryFindArgs([]string{"x", "--limit", "20"})
+	want = []string{"x", "--limit", "20", "--tag", "source:memory"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit limit: got %v want %v", got, want)
 	}
 }

@@ -64,8 +64,16 @@ func TestSkillUsageErrors(t *testing.T) {
 	if err := runSkill(nil); err == nil {
 		t.Error("bare `recall skill` should explain usage")
 	}
+	t.Setenv("RECALL_INDEX", filepath.Join(t.TempDir(), "index.sqlite"))
+	refreshed := 0
+	restore := refreshIndex
+	refreshIndex = func() { refreshed++ }
+	t.Cleanup(func() { refreshIndex = restore })
 	if err := runSkill([]string{"bogus"}); err == nil {
-		t.Error("unknown subcommand should error")
+		t.Error("an unknown skill name should error")
+	}
+	if refreshed != 1 {
+		t.Errorf("a miss should refresh the index once, got %d", refreshed)
 	}
 }
 
