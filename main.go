@@ -53,6 +53,7 @@ USAGE
   recall stats [flags]             session/message counts by source/project
   recall index [--full]            (re)build the local index from all sources
   recall doctor                    health check
+  recall skill <name>              print an installed agent skill's SKILL.md (project copy first)
   recall skill install             refresh installed agent skill copies + source detection
   recall version
 
