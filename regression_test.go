@@ -320,3 +320,33 @@ func TestIndexWriterLockSerialises(t *testing.T) {
 		t.Fatalf("cancelled wait: err=%v, want deadline exceeded", err)
 	}
 }
+
+// A session always matches all of its own top terms, so Search's any-term
+// fallback never ran for Related, and a session whose terms co-occur nowhere
+// else returned nothing. All-terms hits must still come first.
+func TestRelatedFillsFromAnyTerm(t *testing.T) {
+	ix := newTestIndex(t)
+	ctx := context.Background()
+	seed := func(sid, title, text string) {
+		t.Helper()
+		if err := ix.IngestBatch(ctx, "pi",
+			[]Session{{Source: "pi", SourceID: sid, Title: title, MsgCount: 1}},
+			[]Message{{SourceID: sid, Idx: 0, Role: "user", Text: text}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("src", "kafka rebalance", "kafka rebalance storms during deploys")
+	seed("all", "x", "kafka rebalance storms during deploys again")
+	seed("some", "y", "kafka partitions only")
+	hits, err := ix.Related("pi:src", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, h := range hits {
+		ids = append(ids, h.SessionID)
+	}
+	if len(ids) != 2 || ids[0] != "pi:all" || ids[1] != "pi:some" {
+		t.Fatalf("related = %v, want [pi:all pi:some]", ids)
+	}
+}

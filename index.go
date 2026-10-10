@@ -1371,15 +1371,31 @@ func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 		return nil, err
 	}
 
-	out := make([]Hit, 0, len(hits))
-	for _, h := range hits {
-		if h.SessionID == id {
-			continue
+	out := make([]Hit, 0, limit)
+	seen := map[string]bool{id: true}
+	add := func(hs []Hit) {
+		for _, h := range hs {
+			if len(out) >= limit {
+				return
+			}
+			if !seen[h.SessionID] {
+				seen[h.SessionID] = true
+				out = append(out, h)
+			}
 		}
-		out = append(out, h)
-		if len(out) >= limit {
-			break
+	}
+	add(hits)
+	// The source session always matches every one of its own top terms, so
+	// Search's any-term fallback (which runs only on zero AND hits) never fires
+	// here, and a session whose six terms co-occur nowhere else got nothing.
+	// Keep the all-terms hits first, then fill the remaining slots from any term.
+	if terms := ftsTerms(query); len(out) < limit && len(terms) > 1 {
+		more, err := ix.searchMatch(strings.Join(terms, " OR "),
+			SearchOpts{Limit: limit + len(seen)})
+		if err != nil {
+			return nil, err
 		}
+		add(more)
 	}
 	return out, nil
 }
