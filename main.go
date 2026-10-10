@@ -578,7 +578,22 @@ func runIndex(args []string) error {
 		os.Exit(130)
 	}()
 
-	ix, err := openIndex(defaultIndexPath())
+	idxPath := defaultIndexPath()
+	if err := os.MkdirAll(filepath.Dir(idxPath), 0o755); err != nil {
+		return err
+	}
+	// Checkpoints are read below, outside any write transaction, so two
+	// overlapping runs would both append the same messages. Serialise them.
+	unlock, err := lockIndexWriter(ctx, idxPath)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil // interrupted while waiting; nothing was touched
+		}
+		return err
+	}
+	defer unlock()
+
+	ix, err := openIndex(idxPath)
 	if err != nil {
 		return err
 	}

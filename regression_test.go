@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -272,5 +274,49 @@ func TestClipsNeverSplitARune(t *testing.T) {
 	}
 	if got := clipUTF8("abc", 5); got != "abc" {
 		t.Errorf("clipUTF8 = %q", got)
+	}
+}
+
+// Overlapping `recall index` runs (one per pi session, after every turn) each
+// appended the same new messages. The writer lock must make the second wait for
+// the first, and a cancelled wait must give up.
+func TestIndexWriterLockSerialises(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.sqlite")
+	release, err := lockIndexWriter(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan error, 1)
+	go func() {
+		r, err := lockIndexWriter(context.Background(), path)
+		if err == nil {
+			r()
+		}
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		t.Fatalf("second writer did not wait (err=%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second writer never got the lock after release")
+	}
+
+	release, err = lockIndexWriter(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := lockIndexWriter(ctx, path); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled wait: err=%v, want deadline exceeded", err)
 	}
 }
