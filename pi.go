@@ -51,8 +51,11 @@ func (a *PiAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) 
 			return nil
 		}
 		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
-			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
+			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil {
 				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
+				if len(p.msgs) == 0 {
+					return nil // grew by non-message lines; nothing new to index
+				}
 				s := p.session(prevSt.SID)
 				s.Append = true
 				s.StartedAt, s.Project, s.Title = 0, "", ""
@@ -61,10 +64,13 @@ func (a *PiAdapter) ScanStream(ctx context.Context, prev string, emit EmitFunc) 
 		}
 
 		p, e := a.parse(ctx, path, 0, 0, "", true)
-		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
+			// Nothing was indexed, so record no SID: growth must re-read in full
+			// and create the session, not append to one that does not exist.
+			nextMap[path] = fileState{Size: size, MTime: mtime}
 			return nil
 		}
+		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 		return be.add(p.session(p.sessID), p.msgs)
 	})
 	if err != nil {
@@ -333,7 +339,7 @@ func (m PiMessage) Text() string {
 		case "toolResult":
 			if s := p.Content.str; s != "" {
 				if len(s) > 400 {
-					s = s[:400]
+					s = clipUTF8(s, 400)
 				}
 				if b.Len() > 0 {
 					b.WriteByte('\n')
@@ -347,7 +353,7 @@ func (m PiMessage) Text() string {
 				}
 				t := inner.Text
 				if len(t) > 400 {
-					t = t[:400]
+					t = clipUTF8(t, 400)
 				}
 				if b.Len() > 0 {
 					b.WriteByte('\n')

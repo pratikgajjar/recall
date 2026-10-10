@@ -52,8 +52,11 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 			return nil
 		}
 		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
-			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil && len(p.msgs) > 0 {
+			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil {
 				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
+				if len(p.msgs) == 0 {
+					return nil // grew by non-message lines; nothing new to index
+				}
 				s := p.session(prevSt.SID)
 				s.Append = true
 				s.StartedAt, s.Project, s.Title = 0, "", ""
@@ -62,10 +65,12 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 		}
 
 		p, e := a.parse(ctx, path, 0, 0, "", true)
-		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 		if e != nil || p.sessID == "" || len(p.msgs) == 0 {
+			// Nothing indexed: no SID, so growth re-reads in full (see pi.go).
+			nextMap[path] = fileState{Size: size, MTime: mtime}
 			return nil
 		}
+		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 		return be.add(p.session(p.sessID), p.msgs)
 	})
 	if err != nil {
@@ -307,13 +312,13 @@ func (p CodexPayload) flatten(callNames map[string]string) (role, text string) {
 		}
 		args := p.Arguments
 		if len(args) > 400 {
-			args = args[:400]
+			args = clipUTF8(args, 400)
 		}
 		return "tool:" + p.Name, args
 	case "function_call_output":
 		s := p.Output.Content
 		if len(s) > 400 {
-			s = s[:400]
+			s = clipUTF8(s, 400)
 		}
 		// The "[output] " prefix said what the role already says; naming the tool
 		// in the role is both shorter and more informative.

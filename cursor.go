@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,69 +59,48 @@ func (a *CursorAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, 
 		"composerData:"+sourceID).Scan(&blob); err != nil {
 		return nil, fmt.Errorf("composerData %s: %w", sourceID, err)
 	}
-	var cb struct {
-		FullConversationHeadersOnly []struct {
-			BubbleID string `json:"bubbleId"`
-		} `json:"fullConversationHeadersOnly"`
-	}
+	var cb cursorComposerBlob
 	if err := JSONUnmarshal(blob, &cb); err != nil {
 		return nil, err
 	}
-
-	rows, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV
-		WHERE key >= ? AND key < ?`,
-		"bubbleId:"+sourceID+":", "bubbleId:"+sourceID+";")
-	if err != nil {
+	bubbles := map[string][]bubbleRow{}
+	if err := readBubbles(ctx, db, sourceID, bubbles); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	type entry struct {
-		text  string
-		ttype int
-	}
-	bubbles := map[string]entry{}
-	for rows.Next() {
-		var key string
-		var v []byte
-		if err := rows.Scan(&key, &v); err != nil {
-			return nil, err
-		}
-		s := key[len("bubbleId:"):]
-		i := strings.Index(s, ":")
-		if i <= 0 {
-			continue
-		}
-		mid := s[i+1:]
-		text, ttype := extractBubbleText(v)
-		bubbles[mid] = entry{text: text, ttype: ttype}
-	}
-
-	var msgs []Message
-	seen := map[string]bool{}
-	idx := 0
-	for _, h := range cb.FullConversationHeadersOnly {
-		e, ok := bubbles[h.BubbleID]
-		if !ok || e.text == "" {
-			continue
-		}
-		seen[h.BubbleID] = true
-		msgs = append(msgs, Message{
-			SourceID: sourceID, Idx: idx, Role: bubbleRole(e.ttype), TS: 0, Text: e.text,
-		})
-		idx++
-	}
-
-	for mid, e := range bubbles {
-		if seen[mid] || e.text == "" {
-			continue
-		}
-		msgs = append(msgs, Message{
-			SourceID: sourceID, Idx: idx, Role: bubbleRole(e.ttype), TS: 0, Text: e.text,
-		})
-		idx++
+	ordered := orderBubbles(cb.FullConversationHeadersOnly, bubbles[sourceID])
+	msgs := make([]Message, 0, len(ordered))
+	for idx, b := range ordered {
+		msgs = append(msgs, Message{SourceID: sourceID, Idx: idx, Role: bubbleRole(b.ttype), Text: b.text})
 	}
 	return msgs, nil
+}
+
+// orderBubbles puts a composer's bubbles in conversation order: those named in
+// the header first, in header order, then any the header omits, in key order.
+//
+// Search hits carry a message index, and `show` turns that index back into a
+// message by re-reading the source, so the indexer and Fetch must agree on
+// this order exactly. Fetch used to append the omitted bubbles by ranging over
+// a map, which put them in a different order on every call.
+func orderBubbles(headers []cursorComposerHeader, bubbles []bubbleRow) []bubbleRow {
+	byID := make(map[string]bubbleRow, len(bubbles))
+	for _, b := range bubbles {
+		byID[b.msgID] = b
+	}
+	ordered := make([]bubbleRow, 0, len(bubbles))
+	seen := make(map[string]bool, len(bubbles))
+	for _, h := range headers {
+		if b, ok := byID[h.BubbleID]; ok {
+			ordered = append(ordered, b)
+			seen[h.BubbleID] = true
+		}
+	}
+	for _, b := range bubbles {
+		if !seen[b.msgID] {
+			ordered = append(ordered, b)
+		}
+	}
+	return ordered
 }
 
 func (a *CursorAdapter) OpenURL(sourceID string) string {
@@ -283,38 +264,21 @@ func (a *CursorAdapter) readComposers(ctx context.Context, db *sql.DB, cids []st
 		composers[cid] = &cb
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
 
 	bubblesByComp := map[string][]bubbleRow{}
 	for _, cid := range cids {
-		rs, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?`,
-			"bubbleId:"+cid+":", "bubbleId:"+cid+";")
-		if err != nil {
+		if err := readBubbles(ctx, db, cid, bubblesByComp); err != nil {
 			return nil, nil, err
 		}
-		collectBubbles(ctx, rs, bubblesByComp)
 	}
 
 	var sessions []Session
 	var msgs []Message
 	for cid, c := range composers {
-		bubbles := bubblesByComp[cid]
-		bubbleByID := make(map[string]bubbleRow, len(bubbles))
-		for _, b := range bubbles {
-			bubbleByID[b.msgID] = b
-		}
-		var ordered []bubbleRow
-		seen := map[string]bool{}
-		for _, h := range c.FullConversationHeadersOnly {
-			if b, ok := bubbleByID[h.BubbleID]; ok {
-				ordered = append(ordered, b)
-				seen[h.BubbleID] = true
-			}
-		}
-		for _, b := range bubbles {
-			if !seen[b.msgID] {
-				ordered = append(ordered, b)
-			}
-		}
+		ordered := orderBubbles(c.FullConversationHeadersOnly, bubblesByComp[cid])
 		if len(ordered) == 0 {
 			continue
 		}
@@ -349,18 +313,31 @@ type bubbleRow struct {
 	ttype      int
 }
 
-func collectBubbles(ctx context.Context, rs *sql.Rows, into map[string][]bubbleRow) {
+// readBubbles appends composer cid's non-empty bubbles to into, in key order.
+//
+// A read error is returned rather than swallowed: the caller would otherwise
+// index a partial composer and advance the checkpoint past it, so the missing
+// messages never come back short of a --full rebuild.
+func readBubbles(ctx context.Context, db *sql.DB, cid string, into map[string][]bubbleRow) error {
+	rs, err := db.QueryContext(ctx, `SELECT key, value FROM cursorDiskKV
+		WHERE key >= ? AND key < ? ORDER BY key`,
+		"bubbleId:"+cid+":", "bubbleId:"+cid+";")
+	if err != nil {
+		return err
+	}
 	defer rs.Close()
 	n := 0
 	for rs.Next() {
-		if n&4095 == 0 && ctx.Err() != nil {
-			return
+		if n&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		n++
 		var key string
 		var val []byte
 		if err := rs.Scan(&key, &val); err != nil {
-			return
+			return err
 		}
 		s := key[len("bubbleId:"):]
 		i := strings.Index(s, ":")
@@ -375,6 +352,7 @@ func collectBubbles(ctx context.Context, rs *sql.Rows, into map[string][]bubbleR
 		}
 		into[cid] = append(into[cid], bubbleRow{cid, mid, text, ttype})
 	}
+	return rs.Err()
 }
 
 func (a *CursorAdapter) collectTouchedComposers(ctx context.Context, db *sql.DB, prevRowID int64) ([]string, int64, error) {
@@ -399,6 +377,11 @@ func (a *CursorAdapter) collectTouchedComposers(ctx context.Context, db *sql.DB,
 				seen[s[:i]] = true
 			}
 		}
+	}
+	// A truncated read would drop touched composers while the watermark still
+	// advances past them.
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 	out := make([]string, 0, len(seen))
 	for k := range seen {
@@ -497,6 +480,11 @@ func (a *CursorAdapter) mapComposersToProjects(ctx context.Context) (map[string]
 	out := map[string]string{}
 	wsRoot := filepath.Join(a.UserDir, "workspaceStorage")
 	entries, err := os.ReadDir(wsRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No workspace has been opened yet (chats from an empty window only).
+		// That leaves projects unmapped; it is no reason to index nothing.
+		return out, nil
+	}
 	if err != nil {
 		return out, err
 	}

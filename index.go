@@ -372,6 +372,90 @@ func firstLine(s string) string {
 	return s
 }
 
+// ftsDropper removes a session's message rows from messages_fts.
+//
+// messages_fts.session_pk is UNINDEXED, so "DELETE ... WHERE session_pk = ?"
+// cannot seek — it scans the whole FTS table. Each session's rows go in as
+// contiguous rowid runs recorded in msg_ranges, so the delete seeks on the FTS
+// primary key instead. A session indexed before v5 has no range; it falls back
+// to the scan once and gets a range recorded on reinsert.
+//
+// Ingest and ForgetSession share this so neither can leave a msg_ranges row
+// behind: a stale range outlives its session, and once FTS reuses those rowids
+// for another session, the next re-ingest of the first deletes the second's rows.
+type ftsDropper struct {
+	selRanges, delRange, delRangeRows, delFTS *sql.Stmt
+}
+
+func prepareFTSDropper(ctx context.Context, tx *sql.Tx) (*ftsDropper, error) {
+	d := &ftsDropper{}
+	for _, p := range []struct {
+		dst **sql.Stmt
+		q   string
+	}{
+		{&d.selRanges, `SELECT lo, hi FROM msg_ranges WHERE session_pk = ?`},
+		{&d.delRange, `DELETE FROM messages_fts WHERE rowid BETWEEN ? AND ?`},
+		{&d.delRangeRows, `DELETE FROM msg_ranges WHERE session_pk = ?`},
+		{&d.delFTS, `DELETE FROM messages_fts WHERE session_pk = ?`},
+	} {
+		st, err := tx.PrepareContext(ctx, p.q)
+		if err != nil {
+			d.Close()
+			return nil, err
+		}
+		*p.dst = st
+	}
+	return d, nil
+}
+
+func (d *ftsDropper) Close() {
+	for _, st := range []*sql.Stmt{d.selRanges, d.delRange, d.delRangeRows, d.delFTS} {
+		if st != nil {
+			st.Close()
+		}
+	}
+}
+
+// drop deletes pk's FTS rows and its recorded ranges.
+func (d *ftsDropper) drop(pk string) error {
+	rows, err := d.selRanges.Query(pk)
+	if err != nil {
+		return err
+	}
+	type span struct{ lo, hi int64 }
+	var spans []span
+	for rows.Next() {
+		var sp span
+		if err := rows.Scan(&sp.lo, &sp.hi); err != nil {
+			rows.Close()
+			return err
+		}
+		spans = append(spans, sp)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(spans) == 0 {
+		_, err := d.delFTS.Exec(pk) // pre-v5 session: no range to seek with
+		return err
+	}
+	for _, sp := range spans {
+		if _, err := d.delRange.Exec(sp.lo, sp.hi); err != nil {
+			return err
+		}
+	}
+	return d.forgetRanges(pk)
+}
+
+// forgetRanges drops pk's msg_ranges rows without touching FTS. Used when the
+// session row is absent: any range still on record is stale and its rowids may
+// already belong to another session.
+func (d *ftsDropper) forgetRanges(pk string) error {
+	_, err := d.delRangeRows.Exec(pk)
+	return err
+}
+
 func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Session, msgs []Message) error {
 	tx, err := ix.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -411,33 +495,16 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 	}
 	defer sessionExists.Close()
 
-	selRanges, err := tx.Prepare(`SELECT lo, hi FROM msg_ranges WHERE session_pk = ?`)
+	dropper, err := prepareFTSDropper(ctx, tx)
 	if err != nil {
 		return err
 	}
-	defer selRanges.Close()
-	delRange, err := tx.Prepare(`DELETE FROM messages_fts WHERE rowid BETWEEN ? AND ?`)
-	if err != nil {
-		return err
-	}
-	defer delRange.Close()
-	delRangeRows, err := tx.Prepare(`DELETE FROM msg_ranges WHERE session_pk = ?`)
-	if err != nil {
-		return err
-	}
-	defer delRangeRows.Close()
+	defer dropper.Close()
 	insRange, err := tx.Prepare(`INSERT INTO msg_ranges(session_pk, lo, hi) VALUES(?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer insRange.Close()
-
-	// Fallback for sessions indexed before v5, which have no recorded range.
-	delFTS, err := tx.Prepare(`DELETE FROM messages_fts WHERE session_pk = ?`)
-	if err != nil {
-		return err
-	}
-	defer delFTS.Close()
 
 	insFTS, err := tx.Prepare(`INSERT INTO messages_fts(session_pk, idx, role, text, tail) VALUES(?,?,?,?,?)`)
 	if err != nil {
@@ -472,41 +539,6 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 		return err
 	}
 	defer updAgg.Close()
-
-	// dropSessionRows removes a session's FTS rows. It seeks via the recorded
-	// rowid ranges; a session indexed before v5 has none, so it falls back to the
-	// scanning delete once and gets a range recorded on reinsert.
-	dropSessionRows := func(pk string) error {
-		rows, err := selRanges.Query(pk)
-		if err != nil {
-			return err
-		}
-		type span struct{ lo, hi int64 }
-		var spans []span
-		for rows.Next() {
-			var sp span
-			if err := rows.Scan(&sp.lo, &sp.hi); err != nil {
-				rows.Close()
-				return err
-			}
-			spans = append(spans, sp)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if len(spans) == 0 {
-			_, err := delFTS.Exec(pk) // pre-v5 session: no range to seek with
-			return err
-		}
-		for _, sp := range spans {
-			if _, err := delRange.Exec(sp.lo, sp.hi); err != nil {
-				return err
-			}
-		}
-		_, err = delRangeRows.Exec(pk)
-		return err
-	}
 
 	// Group by session, and keep one message per (session, idx). An adapter can
 	// legitimately emit the same session id twice in a batch — cursor-agent
@@ -601,12 +633,16 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 			return fmt.Errorf("upsert session %s: %w", pk, err)
 		}
 		if hadRows {
-			if err := dropSessionRows(pk); err != nil {
+			if err := dropper.drop(pk); err != nil {
 				return err
 			}
 			if _, err := delSessFTS.Exec(pk); err != nil {
 				return err
 			}
+		} else if err := dropper.forgetRanges(pk); err != nil {
+			// An index written before ForgetSession cleaned up after itself can
+			// still hold ranges for a session that has since come back.
+			return err
 		}
 		if _, err := insSessFTS.Exec(pk, s.Title, s.Project); err != nil {
 			return fmt.Errorf("insert session_fts %s: %w", pk, err)
@@ -676,8 +712,8 @@ func withEstimate(s Session) Session {
 // tool-call marker: "[tool:bash] git log --oneline" -> "[tool:bash]".
 var toolArgSuffix = regexp.MustCompile(`(?m)^(\[(?:tool|tool_use):[^\]]+\]|\[call [^\]]+\]) .*$`)
 
-// trimText prepares a message for the search index. Transcripts render from the
-// adapter's Fetch, so this affects search only.
+// splitForIndex prepares a message for the search index. Transcripts render
+// from the adapter's Fetch, so this affects search only.
 //
 // The tool-call argument is dropped here while staying visible in a rendered
 // transcript. Indexing it is actively harmful: measured against the sessions
@@ -686,8 +722,9 @@ var toolArgSuffix = regexp.MustCompile(`(?m)^(\[(?:tool|tool_use):[^\]]+\]|\[cal
 // an unrelated query to win the AND pass and crowd out the right session.
 // Only the argument is stripped, never the marker itself — 13% of messages are
 // nothing but a marker, and removing those entirely drops them from the index.
-// splitForIndex divides a message into the opening that is indexed normally and
-// the windows of everything after it.
+//
+// It divides a message into the opening that is indexed normally and the
+// windows of everything after it.
 //
 // Truncating at excerptMax left 44% of all human and model prose unsearchable:
 // only ~5% of parts are long enough to cut, but they carry nearly half the
@@ -761,15 +798,6 @@ func boundary(s string, start, end int) int {
 		cut--
 	}
 	return cut
-}
-
-func trimText(s string) string {
-	s = toolArgSuffix.ReplaceAllString(s, "$1")
-	s = strings.TrimSpace(s)
-	if len(s) > excerptMax {
-		s = s[:excerptMax]
-	}
-	return s
 }
 
 // BulkMode wraps a batch ingest with write-tuning pragmas. `full` distinguishes
@@ -905,12 +933,8 @@ func (ix *Index) searchMatch(ftsQuery string, opts SearchOpts) ([]Hit, error) {
 	args = append(args, limit)
 
 	bodyWhere := append([]string{}, where...)
-	titleWhere := []string{"sessions_fts MATCH ?"}
-	titleArgs := []any{ftsQuery}
-	for _, w := range where[1:] {
-		titleWhere = append(titleWhere, w)
-	}
-	titleArgs = append(titleArgs, args[1:len(args)-1]...)
+	titleWhere := append([]string{"sessions_fts MATCH ?"}, where[1:]...)
+	titleArgs := append([]any{ftsQuery}, args[1:len(args)-1]...)
 
 	// A title match says "this session is relevant". Scoped to one session that
 	// is already known, so the row is pure noise: it occupies a hit slot and, with
@@ -1326,32 +1350,20 @@ func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 		limit = 10
 	}
 
-	rows, err := ix.db.Query(`
-		SELECT COALESCE(s.title,''),
-		       f.text
-		  FROM sessions s LEFT JOIN messages_fts f ON f.session_pk = s.id
-		 WHERE s.id = ?
-		 ORDER BY f.idx ASC LIMIT 6`, id)
+	var title string
+	err := ix.db.QueryRow(`SELECT COALESCE(title,'') FROM sessions WHERE id = ?`, id).Scan(&title)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ix.missingSessionError(id)
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var title string
-	var snippets []string
-	for rows.Next() {
-		var t, txt string
-		if err := rows.Scan(&t, &txt); err != nil {
-			return nil, err
-		}
-		if title == "" {
-			title = t
-		}
-		if txt != "" {
-			snippets = append(snippets, txt)
-		}
+	snippets, err := ix.openingTexts(id, 6)
+	if err != nil {
+		return nil, err
 	}
 	if title == "" && len(snippets) == 0 {
-		return nil, fmt.Errorf("session %s not found or empty", id)
+		return nil, fmt.Errorf("session %s is empty", id)
 	}
 	query := topTerms(title+" "+strings.Join(snippets, " "), 6)
 	hits, err := ix.Search(query, SearchOpts{Limit: limit + 1})
@@ -1370,6 +1382,40 @@ func (ix *Index) Related(id string, limit int) ([]Hit, error) {
 		}
 	}
 	return out, nil
+}
+
+// openingTexts returns the head text of a session's first n messages.
+//
+// It reads through msg_ranges, because joining messages_fts on its UNINDEXED
+// session_pk scans every row in the table — 9s on a 1.1M-row index, for six
+// rows. Rows of one session go in in idx order, so rowid order is message order.
+func (ix *Index) openingTexts(pk string, n int) ([]string, error) {
+	q := `SELECT f.text FROM msg_ranges r
+	        JOIN messages_fts f ON f.rowid BETWEEN r.lo AND r.hi
+	       WHERE r.session_pk = ? AND f.session_pk = r.session_pk AND f.text != ''
+	       ORDER BY f.rowid LIMIT ?`
+	var hasRange int
+	if err := ix.db.QueryRow(`SELECT COUNT(*) FROM msg_ranges WHERE session_pk = ?`, pk).Scan(&hasRange); err != nil {
+		return nil, err
+	}
+	if hasRange == 0 { // pre-v5 session: no range recorded, scan instead
+		q = `SELECT text FROM messages_fts WHERE session_pk = ? AND text != ''
+		      ORDER BY rowid LIMIT ?`
+	}
+	rows, err := ix.db.Query(q, pk, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 func topTerms(text string, n int) string {
@@ -1499,7 +1545,7 @@ type TagCount struct {
 func (ix *Index) sessionExists(id string) (bool, error) {
 	var n int
 	if err := ix.db.QueryRow(`SELECT 1 FROM sessions WHERE id = ? LIMIT 1`, id).Scan(&n); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
@@ -1626,13 +1672,21 @@ func normalizeTag(s string) string {
 // hits that error when an agent opens them. Tags are deliberately left alone:
 // they are durable user data keyed on the id, and the session may come back.
 func (ix *Index) ForgetSession(id string) error {
-	tx, err := ix.db.Begin()
+	ctx := context.Background()
+	tx, err := ix.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	dropper, err := prepareFTSDropper(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defer dropper.Close()
+	if err := dropper.drop(id); err != nil {
+		return err
+	}
 	for _, q := range []string{
-		`DELETE FROM messages_fts WHERE session_pk = ?`,
 		`DELETE FROM sessions_fts WHERE session_pk = ?`,
 		`DELETE FROM sessions WHERE id = ?`,
 	} {

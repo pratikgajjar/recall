@@ -547,12 +547,12 @@ func TestTrimTextDropsToolArgsButKeepsMarker(t *testing.T) {
 		// A marker quoted inside prose is content, not scaffolding.
 		{"the marker is [tool:bash] in text", "the marker is [tool:bash] in text"},
 	} {
-		if got := trimText(c.in); got != c.want {
-			t.Errorf("trimText(%q) = %q, want %q", c.in, got, c.want)
+		if got, _ := splitForIndex(c.in); got != c.want {
+			t.Errorf("splitForIndex(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 	// A marker-only message must survive: emptying it would drop the document.
-	if got := trimText("[tool:bash] some command"); got == "" {
+	if got, _ := splitForIndex("[tool:bash] some command"); got == "" {
 		t.Error("marker-only message trimmed to empty — it would leave the index")
 	}
 }
@@ -566,8 +566,8 @@ func TestTrimTextStripsCodexCallArgs(t *testing.T) {
 		{"[call shell] ls -la", "[call shell]"},
 		{"[call shell]", "[call shell]"},
 	} {
-		if got := trimText(c.in); got != c.want {
-			t.Errorf("trimText(%q) = %q, want %q", c.in, got, c.want)
+		if got, _ := splitForIndex(c.in); got != c.want {
+			t.Errorf("splitForIndex(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

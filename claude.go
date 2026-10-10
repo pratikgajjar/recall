@@ -62,9 +62,12 @@ func (a *ClaudeAdapter) ScanStream(ctx context.Context, prev string, emit EmitFu
 				nextMap[full] = prevSt
 				continue
 			}
-			if ok && size > prevSt.Size && prevSt.Offset <= size {
-				if p, err := a.parse(ctx, full, prevSt.Offset, prevSt.Idx, sessID, true); err == nil && len(p.msgs) > 0 {
+			if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
+				if p, err := a.parse(ctx, full, prevSt.Offset, prevSt.Idx, sessID, true); err == nil {
 					nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
+					if len(p.msgs) == 0 {
+						continue // grew by non-message lines; nothing new to index
+					}
 					if err := be.add(Session{
 						Source: "claude", SourceID: sessID, Append: true,
 						EndedAt: p.endedAt, MsgCount: len(p.msgs), Chars: p.chars,
@@ -73,14 +76,16 @@ func (a *ClaudeAdapter) ScanStream(ctx context.Context, prev string, emit EmitFu
 					}
 					continue
 				}
-				// fall through to a full re-read on parse failure / truncation
+				// fall through to a full re-read on parse failure
 			}
 
 			p, err := a.parse(ctx, full, 0, 0, sessID, true)
-			nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
 			if err != nil || len(p.msgs) == 0 {
+				// Nothing indexed: no SID, so growth re-reads in full (see pi.go).
+				nextMap[full] = fileState{Size: size, MTime: mtime}
 				continue
 			}
+			nextMap[full] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: sessID}
 			proj := project
 			if p.cwd != "" {
 				proj = p.cwd
@@ -367,7 +372,7 @@ func (m ClaudeMessage) TextWithCalls(callNames map[string]string) string {
 			}
 			t := p.Content
 			if len(t) > 400 {
-				t = t[:400]
+				t = clipUTF8(t, 400)
 			}
 			if b.Len() > 0 {
 				b.WriteByte('\n')
@@ -421,7 +426,7 @@ func titleFromPrompt(p string) string {
 		"<command-args>", "", "<command-message>", "", "</command-message>", " ").Replace(p)
 	p = strings.Join(strings.Fields(p), " ")
 	if len(p) > 80 {
-		p = p[:80]
+		p = clipUTF8(p, 80)
 	}
 	return p
 }

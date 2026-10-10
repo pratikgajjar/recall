@@ -227,8 +227,11 @@ func (a *luaAdapter) streamWholeFile(L *lua.LState, mod *lua.LTable, path string
 func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string, size, mtime int64, prevSt fileState, hadPrev bool, nextMap map[string]fileState, be *batchEmitter) error {
 	if hadPrev && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
 		p, err := a.callLine(L, mod, path, prevSt.Offset, prevSt.Idx, prevSt.SID, mtime/1e6, true)
-		if err == nil && len(p.msgs) > 0 {
+		if err == nil {
 			nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
+			if len(p.msgs) == 0 {
+				return nil // grew by non-message lines; nothing new to index
+			}
 			s := p.session(a.man.id, prevSt.SID)
 			s.Append = true
 			s.StartedAt, s.Project, s.Title = 0, "", ""
@@ -237,10 +240,12 @@ func (a *luaAdapter) streamLineFile(L *lua.LState, mod *lua.LTable, path string,
 	}
 
 	p, err := a.callLine(L, mod, path, 0, 0, "", mtime/1e6, true)
-	nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 	if err != nil || p.sessID == "" || len(p.msgs) == 0 {
+		// Nothing indexed: no SID, so growth re-reads in full (see pi.go).
+		nextMap[path] = fileState{Size: size, MTime: mtime}
 		return nil
 	}
+	nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
 	return be.add(p.session(a.man.id, p.sessID), p.msgs)
 }
 
