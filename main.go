@@ -688,13 +688,23 @@ func runIndex(args []string) error {
 		return nil
 	}
 
-	if *full {
-		fmt.Printf("  optimizing FTS index…")
-		os.Stdout.Sync()
-	}
 	ix.BulkMode(false, *full)
+	// A full run deletes and re-inserts every row, so it always compacts.
+	// Otherwise compact only when the stale-row debt is large enough.
+	need, why := ix.NeedsCompaction()
 	if *full {
-		fmt.Printf("\r\033[K")
+		need, why = true, "full rebuild"
+	}
+	if need {
+		fmt.Printf("  compacting index (%s)…", why)
+		os.Stdout.Sync()
+		t0 := time.Now()
+		if err := ix.Compact(); err != nil {
+			// The counter is unchanged, so the next run tries again.
+			fmt.Printf("\r\033[K  compact failed: %v\n", err)
+		} else {
+			fmt.Printf("\r\033[K  compacted index in %s\n", time.Since(t0).Round(time.Millisecond))
+		}
 	}
 	_ = ix.SetMeta("indexed_at", time.Now().Format(time.RFC3339))
 	fmt.Printf("indexed %d sessions in %s → %s\n",

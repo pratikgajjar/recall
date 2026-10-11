@@ -44,6 +44,10 @@ func indexDSN(path string, readOnly bool) string {
 		pragmas = append(pragmas, "query_only(1)")
 	} else {
 		params = append(params, "_txlock=immediate")
+		// auto_vacuum must precede journal_mode: switching to WAL writes the
+		// file header, after which auto_vacuum changes only through a VACUUM.
+		// On an existing index this is a no-op until Compact converts it.
+		pragmas = append([]string{"auto_vacuum(INCREMENTAL)"}, pragmas...)
 		pragmas = append(pragmas, "journal_mode(WAL)")
 	}
 	for _, p := range pragmas {
@@ -110,6 +114,12 @@ const schemaVersion = "6"
 var tailWeightSQL = strconv.FormatFloat(tailWeight, 'f', -1, 64)
 
 func bootstrap(db *sql.DB) error {
+	// auto_vacuum=INCREMENTAL is set in the DSN (see indexDSN). It lets
+	// Compact return freed pages to the disk without a full VACUUM.
+	hadSchema, err := tableExists(db, "sessions")
+	if err != nil {
+		return err
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id          TEXT PRIMARY KEY,
@@ -192,6 +202,13 @@ func bootstrap(db *sql.DB) error {
 	for _, s := range ftsStmts {
 		if _, err := db.Exec(s); err != nil {
 			return fmt.Errorf("%s: %w", firstLine(s), err)
+		}
+	}
+	if !hadSchema {
+		// A new index has no stale rows. An existing index without this key has
+		// an unknown history, so NeedsCompaction compacts it once.
+		if _, err := db.Exec(`INSERT OR IGNORE INTO meta(k,v) VALUES(?, '0')`, metaStaleRows); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -385,6 +402,22 @@ func firstLine(s string) string {
 // for another session, the next re-ingest of the first deletes the second's rows.
 type ftsDropper struct {
 	selRanges, delRange, delRangeRows, delFTS *sql.Stmt
+	// deleted counts the FTS rows removed. FTS5 does not remove a deleted
+	// row's postings; it writes a delete marker and keeps both until a merge
+	// reaches them. The count is the stale data that Compact recovers.
+	deleted int64
+}
+
+// addStale records n deleted FTS rows in the stale-row counter. It is an
+// UPDATE, so an index whose counter is missing (history unknown) keeps it
+// missing until Compact sets it.
+func addStale(ctx context.Context, tx *sql.Tx, n int64) error {
+	if n == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`UPDATE meta SET v = CAST(v AS INTEGER) + ? WHERE k = ?`, n, metaStaleRows)
+	return err
 }
 
 func prepareFTSDropper(ctx context.Context, tx *sql.Tx) (*ftsDropper, error) {
@@ -437,15 +470,27 @@ func (d *ftsDropper) drop(pk string) error {
 		return err
 	}
 	if len(spans) == 0 {
-		_, err := d.delFTS.Exec(pk) // pre-v5 session: no range to seek with
-		return err
-	}
-	for _, sp := range spans {
-		if _, err := d.delRange.Exec(sp.lo, sp.hi); err != nil {
+		res, err := d.delFTS.Exec(pk) // pre-v5 session: no range to seek with
+		if err != nil {
 			return err
 		}
+		d.count(res)
+		return nil
+	}
+	for _, sp := range spans {
+		res, err := d.delRange.Exec(sp.lo, sp.hi)
+		if err != nil {
+			return err
+		}
+		d.count(res)
 	}
 	return d.forgetRanges(pk)
+}
+
+func (d *ftsDropper) count(res sql.Result) {
+	if n, err := res.RowsAffected(); err == nil {
+		d.deleted += n
+	}
 }
 
 // forgetRanges drops pk's msg_ranges rows without touching FTS. Used when the
@@ -683,6 +728,9 @@ func (ix *Index) IngestBatch(ctx context.Context, source string, sessions []Sess
 			}
 		}
 	}
+	if err := addStale(ctx, tx, dropper.deleted); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -817,17 +865,111 @@ func (ix *Index) BulkMode(on, full bool) {
 		return
 	}
 
-	if full {
-		_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
-		_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts) VALUES('optimize')`)
-	}
+	// automerge is stored in the FTS table, not the connection. A full run that
+	// turned it off and never turned it back on left every later run with no
+	// background merging, so delete markers and their rows were never removed.
+	// Restore it on every exit path, including an interrupted run.
+	_, _ = ix.db.Exec(`INSERT INTO messages_fts(messages_fts, rank) VALUES('automerge', ?)`, ftsAutomerge)
+	_, _ = ix.db.Exec(`INSERT INTO sessions_fts(sessions_fts, rank) VALUES('automerge', ?)`, ftsAutomerge)
 	_, _ = ix.db.Exec(`PRAGMA synchronous=NORMAL`)
 	_, _ = ix.db.Exec(`PRAGMA cache_size=-65536`)
-	if full {
-		_, _ = ix.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-	} else {
-		_, _ = ix.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`)
+	_, _ = ix.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`)
+}
+
+// ftsAutomerge is the FTS5 default: merge once a level holds 4 segments.
+const ftsAutomerge = 4
+
+// metaStaleRows counts FTS rows deleted since the last Compact.
+const metaStaleRows = "fts_stale_rows"
+
+// Compact when stale rows exceed 1/compactStaleDivisor of live rows. Below
+// that, a merge costs more than the space it recovers.
+const compactStaleDivisor = 10
+
+// NeedsCompaction reports whether the FTS index holds enough stale data to
+// merge it now, and why.
+//
+// The stale data comes from deletes. A full rebuild deletes every row and
+// inserts it again, so it doubles the index until a merge runs. That merge was
+// one 'optimize' at the end of the run, with its error ignored. A run that was
+// interrupted, or that lost the write lock to a concurrent run, skipped it and
+// nothing ran it later: a real index was 3.2 GB of FTS data where 0.36 GB was
+// live. The counter keeps the debt until a Compact pays it.
+func (ix *Index) NeedsCompaction() (bool, string) {
+	v := ix.GetMeta(metaStaleRows)
+	if v == "" {
+		return true, "first run since upgrade"
 	}
+	stale, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return true, "stale-row counter unreadable"
+	}
+	var live int64
+	if err := ix.db.QueryRow(`SELECT COUNT(*) FROM messages_fts_docsize`).Scan(&live); err != nil {
+		return false, ""
+	}
+	if stale > 0 && stale*compactStaleDivisor >= live {
+		return true, fmt.Sprintf("%d stale rows, %d live", stale, live)
+	}
+	return false, ""
+}
+
+// Compact merges each FTS index into one segment, which drops deleted rows and
+// their delete markers, and then returns the freed pages to the disk.
+// It holds the write lock for its duration; searches continue under WAL.
+func (ix *Index) Compact() error {
+	for _, t := range []string{"messages_fts", "sessions_fts"} {
+		if _, err := ix.db.Exec(`INSERT INTO ` + t + `(` + t + `) VALUES('optimize')`); err != nil {
+			return fmt.Errorf("optimize %s: %w", t, err)
+		}
+	}
+	if err := ix.SetMeta(metaStaleRows, "0"); err != nil {
+		return err
+	}
+	if err := ix.reclaim(); err != nil {
+		return fmt.Errorf("reclaim free pages: %w", err)
+	}
+	_, err := ix.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
+
+// reclaim gives free pages back to the file system. SQLite reuses free pages
+// for later writes, so a small free list is left in place.
+func (ix *Index) reclaim() error {
+	var pages, free, mode int64
+	for _, p := range []struct {
+		q   string
+		dst *int64
+	}{
+		{`PRAGMA page_count`, &pages},
+		{`PRAGMA freelist_count`, &free},
+		{`PRAGMA auto_vacuum`, &mode},
+	} {
+		if err := ix.db.QueryRow(p.q).Scan(p.dst); err != nil {
+			return err
+		}
+	}
+	if free*4 < pages {
+		return nil
+	}
+	if mode == 2 { // INCREMENTAL
+		_, err := ix.db.Exec(`PRAGMA incremental_vacuum`)
+		return err
+	}
+	// An index created before auto_vacuum was set. The mode only changes
+	// through a VACUUM, so convert it once; later compactions are incremental.
+	// VACUUM builds a complete copy, so put it in a file, not in memory.
+	for _, q := range []string{
+		`PRAGMA auto_vacuum=INCREMENTAL`,
+		`PRAGMA temp_store=FILE`,
+		`VACUUM`,
+		`PRAGMA temp_store=MEMORY`,
+	} {
+		if _, err := ix.db.Exec(q); err != nil {
+			return fmt.Errorf("%s: %w", q, err)
+		}
+	}
+	return nil
 }
 
 func (ix *Index) SetMeta(k, v string) error {
@@ -1700,6 +1842,9 @@ func (ix *Index) ForgetSession(id string) error {
 	}
 	defer dropper.Close()
 	if err := dropper.drop(id); err != nil {
+		return err
+	}
+	if err := addStale(ctx, tx, dropper.deleted); err != nil {
 		return err
 	}
 	for _, q := range []string{
