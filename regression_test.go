@@ -350,3 +350,40 @@ func TestRelatedFillsFromAnyTerm(t *testing.T) {
 		t.Fatalf("related = %v, want [pi:all pi:some]", ids)
 	}
 }
+
+// --context on a title match printed only the snippet, so the best hit came
+// with no context; and every expanded hit restated the session header that
+// the hit line above it had just printed.
+func TestContextExpandsTitleHitsWithoutRepeatingHeader(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".pi", "agent", "sessions")
+	writeLines(t, piPath(root, "s1"),
+		piSession("s1", "/work/web", "2026-05-03T08:00:00Z"),
+		piMsg("user", "zebra migration plan", "2026-05-03T08:00:02Z"),
+		piMsg("assistant", "first we copy the table", "2026-05-03T08:00:06Z"),
+		piMsg("user", "then what", "2026-05-03T08:00:09Z"),
+	)
+	ix := newTestIndex(t)
+	ss, ms, _, err := (&PiAdapter{Root: root}).Scan(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.IngestBatch(context.Background(), "pi", ss, ms); err != nil {
+		t.Fatal(err)
+	}
+	hits := []Hit{{SessionID: "pi:s1", Source: "pi", Title: "zebra migration plan", MsgIdx: -1, Role: "title"}}
+	var b strings.Builder
+	if err := printHitsWithContext(context.Background(), &b, ix, hits, 1); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{"## 0 user", "zebra migration plan", "## 1 assistant", "## 2 user"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("title hit context lost %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "source=pi") {
+		t.Errorf("expanded hit repeats the session header:\n%s", out)
+	}
+}

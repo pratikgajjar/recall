@@ -561,19 +561,22 @@ func printHitsWithContext(ctx context.Context, w io.Writer, ix *Index, hits []Hi
 			fmt.Fprintf(w, "id=%s  msg=%d\n\n", h.SessionID, h.MsgIdx)
 		}
 
-		if h.MsgIdx < 0 { // a title-only match has no message to expand
-			fmt.Fprintf(w, "%s\n\n", h.Snippet)
-			continue
+		// A title match points at no message. The title states what the session
+		// is about, and the opening turns say the same thing in full, so expand
+		// those. Printing only the snippet left the best hit with no context.
+		center := max(h.MsgIdx, 0)
+		lo := max(center-n, 0)
+		hi := center + n + 1
+		if h.MsgIdx < 0 {
+			hi = 2*n + 1
 		}
-		lo := h.MsgIdx - n
-		if lo < 0 {
-			lo = 0
-		}
+		// The hit header above already names the session, so the transcript's
+		// own title and source line would only repeat it.
 		if err := printTranscriptTo(ctx, w, ix, h.SessionID, false, transcriptOpts{
-			Range:      fmt.Sprintf("%d:%d", lo, h.MsgIdx+n+1),
+			Range:      fmt.Sprintf("%d:%d", lo, hi),
 			ToolChars:  defaultToolChars,
 			MaxChars:   defaultMaxChars,
-			OmitHeader: shared,
+			OmitHeader: true,
 		}); err != nil {
 			return err
 		}
