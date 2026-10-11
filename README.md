@@ -1,277 +1,241 @@
 # recall
 
-> Your AI chat history, searchable. Across Cursor, Claude Code, Codex, and pi.
-> Really fast. Read-only. No copies.
+Search your AI chat history from the terminal. recall reads the history of
+pi, Claude Code, Codex, Cursor and Cursor Agent, and finds a past
+conversation in milliseconds.
 
-`recall` indexes the conversations you've already had with Cursor, Claude Code,
-OpenAI Codex CLI, and pi — straight from their native storage. It does not move,
-copy, or modify your data. It builds a tiny searchable index over excerpts and
-metadata, and lets you grep the lot from your terminal.
+![recall finds and shows past sessions from pi, Claude Code and Codex](packages/pi-recall/assets/demo.png)
 
-![recall running inside pi](packages/pi-recall/assets/demo.png)
-
-_Above: the [pi extension](packages/pi-recall) lets an agent run `recall`
-to find a past conversation and read it back — no copy-paste._
-
-```
-$ recall doctor
-recall 0.1.0
-
-sources:
-  ✓ cursor  ~/Library/Application Support/Cursor/User/globalStorage/state.vscdb
-  ✓ claude  ~/.claude/projects
-  ✓ codex   ~/.codex/sessions
-
-index: ~/.recall/index.sqlite (69.5 MiB)
-  cursor  1514 sessions
-  claude    25 sessions
-  codex   1058 sessions
-  total   2597 sessions
-
-$ recall "import cycle" --limit 3
-2025-09-02 18:36  cursor  ~/code/acme-api    Fix import cycle in proto files
-    id=cursor:a3f21c08-0000-4a1b-9c2d-5e6f70819abc  msg=1  role=assistant
-    I'll help you fix the «import» «cycle» in the request logging…
-
-$ recall last --repo ~/code/acme-api | claude -p "continue this"
-```
+recall reads each tool's own files and does not change them. It keeps one
+search index at `~/.recall/index.sqlite`. You can delete the index at any
+time and build it again.
 
 ## Install
 
+Use one of these commands:
+
 ```bash
-# Homebrew
 brew install pratikgajjar/tap/recall
-
-# one-line installer (downloads the right prebuilt binary)
 curl -fsSL https://raw.githubusercontent.com/pratikgajjar/recall/main/install.sh | sh
-
-# …or with Go
 go install github.com/pratikgajjar/recall@latest
-
-# …or grab a binary from https://github.com/pratikgajjar/recall/releases
 ```
 
-Then build the index once:
+Prebuilt binaries for macOS and Linux are on the
+[releases page](https://github.com/pratikgajjar/recall/releases). recall is
+one static Go binary. It does not need CGO.
+
+## Quick start
 
 ```bash
-recall index           # one-time, ~1 minute on real data
-recall doctor
-recall <query>
+recall index                 # build the index (about 1 minute for 6,000 sessions)
+recall doctor                # show the sources that recall found
+recall "flaky checkout test" # search
 ```
 
-Pure Go, no CGO. Builds a single static binary.
+## Use recall with an agent
 
-## Use it in your agent
+An agent uses the same CLI that you use. recall has no server and no tool
+schema. A skill file tells the agent which commands to run.
 
-recall is a CLI, and agents use it the way you would. There is no server and no
-tool schema: one surface, one set of flags, one thing to keep correct.
+| Agent | Setup |
+|---|---|
+| pi | `pi install npm:@pratikgajjar/pi-recall` ([details](packages/pi-recall)) |
+| Claude Code | `recall skill install ~/.claude/skills/recall` |
+| Other skill systems | `npx skills add pratikgajjar/recall` |
+| Any agent with a shell | Tell the agent to read `recall --help` |
 
-**As a skill** — for any agent with a skills system and shell access (Claude
-Code Agent Skills, pi skills):
+The binary contains the skill file. `recall skill install DIR` writes it to
+DIR. Without DIR, the command updates each copy that is already installed.
+`recall doctor` shows a copy that is older than the binary.
 
-```bash
-npx skills add pratikgajjar/recall          # via the skills CLI (skills.sh)
-# or manually:  cp -r skills/recall ~/.claude/skills/recall
-# or from the binary, which carries its own copy:
-recall skill install
-```
-
-**pi** — `pi install npm:@pratikgajjar/pi-recall`
-([packages/pi-recall](packages/pi-recall)). The extension installs the skill and
-keeps the index warm in the background. It registers no tools.
-
-**Anything else with shell access** — point it at `recall --help`. The skill
-file is just the short version of that, written for an agent.
-
-The skill is also embedded in the binary. `recall doctor` flags installed copies
-that have fallen behind it, and `recall skill install` refreshes them — a stale
-skill keeps recommending the expensive path long after the binary stopped.
-
-Once connected, ask the agent things like _"use recall to find how we fixed the
-import cycle"_ and it will search and read the relevant past session.
-
-For huge sessions, every integration takes `range` (Python-style slice like
-`"305:315"` or `"-50:"`) and `outline` (one line per message), so an LLM can
-navigate and read slices instead of dumping a 25 MB transcript into context.
-Sessions over 200 messages default to outline when no slice is requested.
+Then ask the agent a question about earlier work. For example: _"Use recall
+to find how we fixed the flaky checkout test."_
 
 ## Commands
 
 ```
-recall <query>                     search; prints ranked hits (alias: 'find')
-recall last [--repo P]             full transcript of the most recent matching session
-recall show <session-id>           full transcript of one session
-recall sessions [--repo P]         list recent sessions
-recall related <session-id>        sessions on the same topic
-recall memory|skill [terms]        find in that source; an exact title prints it
-recall open <session-id>           reopen in the source tool (cursor://, claude --resume, …)
-recall tag                         list all tags + counts (git-tag style)
-recall tag <session-id|.> <tag>…   attach durable tags (. = current Pi session)
-recall tag -d <session-id> <tag>…  remove tags
-recall stats [flags]               sessions/messages/tokens/cost by source, project, model
-recall index [--full] [--prune]    (re)build the index; --prune drops sessions
-                                   whose source was deleted (needs --full)
-recall plugin list                 show bundled + installed Lua plugins
-recall plugin install <name>       install a bundled plugin into ~/.recall/plugins
-recall doctor                      health check
+recall <query>                     search; show ranked hits (alias: find)
+recall last [--repo P]             show the most recent matching session
+recall show <session-id>           show one session, read again from its source
+recall sessions                    list sessions without their messages
+recall related <session-id>        find sessions about the same topic
+recall open <session-id>           open the session in its own tool
+recall tag <session-id|.> <tag>... add tags (. = the current pi session)
+recall tag -d <session-id> <tag>...  remove tags
+recall tag [-l]                    list tags and their counts
+recall stats                       sessions, messages, tokens and cost
+recall index [--full] [--prune]    update the index
+recall memory|skill [terms]        search memory or skill files; an exact title shows the file
+recall plugin list|install|test    manage Lua plugins
+recall skill install [DIR]         install or update the agent skill
+recall doctor                      show sources, index size and skill status
 ```
 
-Flags can appear anywhere on the line:
+### Search flags
 
-```
---repo PATH      restrict to a project folder
---after WHEN     started after: a duration (7d), epoch-ms, or YYYY-MM-DD
---before WHEN    started before (pages back through history)
---since WHEN     alias for --after
---limit N        default 30
---tag SELECTOR   filter, repeatable (AND). A user tag, or a reserved facet:
-                 source:cursor|claude|codex|pi
---json           machine-readable output
---context N      print N messages around each hit (like grep -C), so a search
-                 answers "find it and show me" without a follow-up `show`
-```
+You can put a flag anywhere on the command line.
 
-`stats` also takes `--projects N` / `--models N` (rows per table, `0` = all)
-and `--csv <prefix>` (see below).
+| Flag | Effect |
+|---|---|
+| `--repo PATH` | Search one project and its subfolders. `.` is the Git repository of the current directory. |
+| `--in SESSION-ID` | Search one session. `.` is the current pi session. |
+| `--after WHEN`, `--since WHEN` | Sessions that started after WHEN: `7d`, `YYYY-MM-DD` or epoch milliseconds. |
+| `--before WHEN` | Sessions that started before WHEN. |
+| `--tag TAG` | Sessions with this tag. Repeat the flag to require all tags. `source:pi` selects one source. |
+| `--context N` | Show N messages before and after each hit. |
+| `--limit N` | Show at most N hits. The default is 30. |
+| `--json` | Write JSON. |
 
-`find`, `sessions`, and `show` print terse, copy-pasteable **`next:`/`prev:`**
-page commands at the bottom (text mode) so you — or an agent — can traverse all
-matches. Across sessions it pages by time (`--before`/`--after`); within a
-session it pages by message window (`--range`). `--json` output stays clean; use
-`started_at_ms` to page programmatically.
+Text output ends with `next:` and `prev:` lines. Each line is a complete
+command for the next page of results.
+
+### Read a long session
+
+Some sessions have thousands of messages. Do not read all of them.
+
+1. To find a topic in a session, search the session:
+   `recall "pool timeout" --in pi:019f... --context 3`.
+2. To see the structure of a session, use `recall show <id> --outline`.
+   The outline shows one line for each turn. It shows a run of tool calls
+   as one line.
+3. To read part of a session, use `--range`. The value is a Python slice:
+   `305:315`, `:50` or `-50:`.
+4. To remove tool output, use `--role user,assistant`.
+
+Each message has a `## N role` header, so each part of a session shows its
+position. Output has limits. A session with more than 200 messages shows the
+outline first. A read stops at 20,000 characters and tells you the next
+range. A tool result stops at 600 characters. Use `--tool-chars 0` to see all
+of it.
 
 ### Tags
 
-Tag any session to find it again later — tags are **durable**: they live in a
-separate table the indexer never rebuilds, so they survive `recall index --full`.
+A tag marks a session so that you can find it again. Tags are in their own
+table. `recall index --full` does not remove them.
 
 ```bash
-recall tag . deploy-rca                           # current Pi session (Pi shell tool)
-recall tag cursor:94dc8775-… deploy-rca auth-design # another session by ID
-recall sessions --tag deploy-rca                      # find tagged sessions
-recall sessions --tag deploy-rca --tag source:cursor  # tag + facet, AND
+recall tag . deploy-rca                     # tag the current pi session
+recall tag claude:94b0155c-... deploy-rca   # tag a session by its id
+recall sessions --tag deploy-rca            # list the tagged sessions
+recall sessions --tag deploy-rca --tag source:pi
 ```
 
-`source` is exposed as a reserved **facet** through the same `--tag` selector
-(`--tag source:cursor`) rather than a separate flag — one filter vocabulary,
-k8s-label style. Reserved facets are derived from the session, so you can filter
-by them but can't author them as tags. Agents can tag with `recall tag` the
-tool to bookmark sessions worth remembering.
+`source:` is a reserved prefix. recall sets it from the session. You cannot
+add it as a tag.
 
-`.` resolves via Pi's `PI_SESSION_ID`, never by guessing the newest chat in the
-current directory. If not running from a Pi shell tool, pass an explicit ID.
-If the current session isn't indexed, run `recall index` and retry.
+`.` uses the `PI_SESSION_ID` variable that pi sets. If the variable is not
+set, give the session id.
 
 ### Tokens and cost
 
-`recall stats` reports what your sessions actually cost, rolled up by source,
-project, and model:
+`recall stats` shows sessions, messages, tokens and cost by source, project
+and model.
 
 ```
-$ recall stats --projects 2 --models 4
+$ recall stats --projects 2 --models 3
 SOURCE  SESSIONS  MESSAGES  TOKENS  COST        PROJECT
 pi      686       313807    31.3B   $17190.19   (all)
         20        69379     5.7B    $2701.57      ~/code/ledger
         187       68149     6.7B    $2273.09      ~/code/api-server
-                                                  … 73 more (--projects 0)
 codex   1088      37493     771.4M  -           (all)
 
 MODEL                SOURCE  SESSIONS  TOKENS  CACHED  COST
 claude-opus-4-8      pi      192       8.2B    96%     $6687.34
 claude-opus-4-7      pi      122       7.2B    96%     $2732.05
 gpt-5.6-sol          codex   18        415.5M  93%     -
-… 68 more
 ```
 
-Nothing here is computed from a price list recall carries — there isn't one.
-Every number is read back out of what the tool itself recorded:
+recall does not have a price list. It shows only the values that each tool
+wrote:
 
 | Source | Model | Tokens | Cost |
 |---|---|---|---|
-| pi | `message.model` | per-message `usage` summed over turns | `usage.cost.total`, priced by pi |
-| codex | `turn_context.model` | `token_count` running total | — (subscription; codex logs quota %, not dollars) |
+| pi | `message.model` | `usage` of each message, added together | `usage.cost.total` |
+| codex | `turn_context.model` | last `token_count` total | not recorded |
 | cursor | `modelConfig.modelName` | `contextTokensUsed` | `usageData.costInCents` |
-| claude, cursor-agent, obsidian | — | estimated | — |
+| claude, cursor-agent, plugins | not recorded | estimate | not recorded |
 
-Sources that record no usage fall back to a character-count estimate, always
-printed with a leading `~` so it is never mistaken for a measurement. A `-`
-means the source genuinely does not record that number. Sessions from a source
-with no model name still appear, grouped under `(unknown)`, so the token totals
-always add up.
+An estimate starts with `~`. recall calculates it from the length of the
+text. A `-` means that the source does not record the value.
 
-### CSV export
+`recall stats --csv usage-` writes `usage-projects.csv` and
+`usage-models.csv`. The files contain raw numbers and an `estimated` column.
+All filters apply. Row limits do not apply.
 
-```bash
-recall stats --csv usage-      # → usage-projects.csv, usage-models.csv
-```
+## Sources
 
-Raw unformatted numbers (`8152978475`, not `8.2B`; no `$`, no `~`) so a
-spreadsheet can do arithmetic on them; the `~` becomes an `estimated` column you
-can filter on. All filters apply (`--repo`, `--since`, `--tag`), and row caps do
-not — an export is everything.
-
-```bash
-# cost per 1M tokens, measured rows only
-recall stats --csv u- && python3 -c "
-import csv
-for r in csv.DictReader(open('u-models.csv')):
-    if r['estimated']=='false' and float(r['cost_usd'])>0:
-        print(r['model'], round(float(r['cost_usd'])/(int(r['tokens'])/1e6), 3))"
-```
-
-## What it reads
-
-| Tool | Storage | Notes |
+| Tool | Files | Notes |
 |---|---|---|
-| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` and per-workspace `state.vscdb` | Walks `composerData:*` + `bubbleId:*` blobs; joins to workspace folder via `workspaceStorage/*/workspace.json` |
-| Claude Code | `~/.claude/projects/<sanitized-cwd>/*.jsonl` | One file per session, append-only JSONL |
-| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | First line is `session_meta`; rest are `response_item` payloads |
-| pi | `~/.pi/agent/sessions/<sanitized-cwd>/*.jsonl` | First line is the `session` event; rest are `message` events |
-| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | `{role, message:{content:[parts]}}` per line; no per-event timestamps, so sessions are dated by file mtime. Title prefers `~/.cursor/chats/<workspace>/<id>/meta.json` (sidebar name); first user prompt is the fallback |
+| pi | `~/.pi/agent/sessions/<cwd>/*.jsonl` | Append-only JSONL. recall reads only the new lines. |
+| Claude Code | `~/.claude/projects/<cwd>/*.jsonl` | Append-only JSONL. |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Append-only JSONL. |
+| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite, opened read-only. `workspaceStorage` gives the project folder. |
+| Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | No timestamps in the file, so recall uses the file time. |
 
-The index lives at `~/.recall/index.sqlite`. It contains:
+To index another source, add a Lua plugin. See [Lua plugins](#lua-plugins).
 
-- `sessions(id, source, source_id, project, title, started_at, msg_count, …)`
-- `messages_fts(session_pk, idx, role, ts, text)` — SQLite FTS5 over excerpts (trimmed to ~1.5 KB per message)
+## The index
 
-Nuke `~/.recall/` and re-run `recall index` any time. The index is disposable.
+recall stores the index at `~/.recall/index.sqlite`. Set `RECALL_INDEX` to use
+a different file.
 
-## Index anything: Lua plugins
+- **Search.** SQLite FTS5 with BM25 ranking. The first 1,500 bytes of a
+  message have full weight. The remainder of the message is indexed in
+  windows with less weight, so text deep in a long message is also found.
+- **Updates.** `recall index` reads only the new lines of each changed
+  file. When nothing changed, a run takes about 50 ms. The pi extension runs
+  it after each agent turn.
+- **Concurrent runs.** A lock file lets only one `recall index` write at a
+  time. A second run waits, then indexes only the remaining changes.
+- **Maintenance.** FTS5 keeps deleted rows until it merges the index. recall
+  counts the deleted rows. When they are more than 10% of the live rows, or
+  after `--full`, recall merges the index and returns the free space to the
+  disk. You do not have to run `VACUUM`.
+- **Removed sessions.** `recall index --full --prune` removes sessions that
+  are no longer in their source.
 
-The sources above are built in. Anything else — a notes vault, another
-agent's history, any JSONL or SQLite-backed log — is indexable by a small Lua
-plugin, no recompile. A plugin is a sandboxed pure transform (no `os`/`io`/net):
-recall owns all I/O, the plugin just maps bytes to records.
+Measured on one Apple silicon laptop with 6,060 sessions and 1.1 million
+indexed rows:
+
+| Operation | Time |
+|---|---|
+| Search, median | 38 ms |
+| Search, p95 | 68 ms |
+| `recall index`, no changes | 55 ms |
+| `recall index --full` | 70 s |
+| Index size | 1.5 GB |
+
+## Lua plugins
+
+A Lua plugin adds a source without a new build of recall. recall does all of
+the file and database I/O. The plugin only changes bytes into sessions and
+messages. The plugin cannot open files, run commands or use the network.
 
 ```bash
-recall plugin list                 # bundled + installed
-recall plugin install obsidian     # → ~/.recall/plugins/obsidian.lua
-recall index                       # now indexes your vault too
+recall plugin list                 # show bundled and installed plugins
+recall plugin install obsidian     # copy a bundled plugin to ~/.recall/plugins
+recall plugin test my.lua sample   # show the records that a plugin makes from a file
+recall index                       # index the new source
 ```
 
-Bundled plugins install on demand (nothing auto-runs until you ask); anything in
-`~/.recall/plugins/*.lua` is auto-discovered on the next `index`, and a broken
-plugin is skipped without blocking the others. Kinds: `line` (JSONL), `file`
-(whole document), `kv` (SQLite, incremental via a `watermark`).
+recall loads each `~/.recall/plugins/*.lua` file when it indexes. If a plugin
+fails, recall skips it and continues. A plugin can be one of three kinds:
+`line` (JSONL), `file` (one document) or `kv` (a SQLite key/value table).
 
 See [`plugins/`](plugins/) for examples and
-[`architecture.md`](architecture.md) for the full contract.
+[`architecture.md`](architecture.md) for the plugin contract.
 
 ## Design
 
-- **Read-only.** Sources stay the source of truth.
-- **No materialization.** No markdown copies, no canonical schema migrations.
-- **One binary.** Single Go executable, ~10 MB, no CGO.
-- **SQLite + FTS5** for search. `bm25` ranking with a small recency lift.
-- **Adapter trait.** Add a new tool = implement one interface (`Adapter` in `types.go`).
+- **Read-only.** The source files stay the source of truth.
+- **No copies.** The index contains only text for search and session data.
+  `show` reads the session again from its source.
+- **One binary.** One Go executable, about 13 MB, without CGO.
+- **One interface.** Each source implements the `Adapter` interface in
+  `types.go`.
 
-Inspired by [`fff`](https://github.com/dmtrKovalenko/fff)'s pattern: thin index,
-live source reads.
-
-## Status
-
-v0.1. Incremental indexing (append-only) and the pi extension
-all work. A filesystem watcher and a TUI are next.
+[`autoresearch.md`](autoresearch.md) records how the search and index
+behaviour was measured, and the experiments that failed.
 
 ## Licence
 

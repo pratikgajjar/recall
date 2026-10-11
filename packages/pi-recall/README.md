@@ -1,12 +1,11 @@
 # pi-recall
 
-> A [pi](https://github.com/badlogic/pi-mono) extension that lets the agent search **your past AI chat history** — across Cursor, Claude Code, Codex, and pi — without you copy-pasting transcripts.
+A [pi](https://github.com/badlogic/pi-mono) extension for
+[recall](https://github.com/pratikgajjar/recall). With it, a pi agent can find
+and read your past AI sessions from pi, Claude Code, Codex and Cursor. You do
+not have to copy and paste transcripts.
 
-It's a thin wrapper over the [`recall`](https://github.com/pratikgajjar/recall) CLI, which indexes your conversations into a local SQLite FTS5 index. The extension shells out to that binary and exposes the index to the agent as tools.
-
-![recall running inside pi](./assets/demo.png)
-
-_The agent runs `recall` to find a past conversation, then reads it back — no copy-paste._
+![recall finds and shows past sessions from pi, Claude Code and Codex](./assets/demo.png)
 
 ## Install
 
@@ -14,121 +13,114 @@ _The agent runs `recall` to find a past conversation, then reads it back — no 
 pi install npm:@pratikgajjar/pi-recall
 ```
 
-The prebuilt `recall` binary for your platform ships inside the package, so
-`pi install` / `pi update` keep the extension **and** the binary in lockstep —
-no separate `go install` or `brew`. The extension resolves the binary in this
-order: `--recall-bin` flag -> `RECALL_BIN` env -> bundled binary -> `recall` on `PATH`.
+The package contains the `recall` binary for your platform. `pi update`
+updates the extension and the binary together. The extension uses the first
+binary that it finds in this order:
 
-Then build the index once:
+1. The `--recall-bin` flag.
+2. The `RECALL_BIN` environment variable.
+3. The binary in this package.
+4. `recall` on your `PATH`.
+
+Build the index one time:
 
 ```bash
-recall index        # one-time, ~1 minute on real data
-recall doctor       # confirm sources are detected
+recall index    # about 1 minute for 6,000 sessions
+recall doctor   # show the sources that recall found
 ```
 
-For local development, load the extension ad-hoc:
+To load the extension from a source checkout:
 
 ```bash
 pi -e ./packages/pi-recall/src/index.ts
 ```
 
-## What it does
+## What the extension does
 
-Nothing an agent has to learn a schema for. On session start it installs the
-`recall` skill and refreshes the index; after each agent turn it refreshes again
-in the background, so the index already reflects the conversation you are having.
+- At session start, it installs the recall skill and updates the index.
+- After each agent turn, it updates the index in the background. The current
+  session is then searchable.
+- It adds the `/recall-health` and `/recall-index` commands.
 
-It registers **no tools**. The agent runs the CLI:
+The extension registers no tools. The agent runs the CLI from its shell tool,
+and the skill tells it which commands to use:
 
 ```bash
-recall "connection pool timeout" --limit 5      # search
-recall show pi:019f… --range 300:340            # read a slice
-recall "pool timeout" --in pi:019f… --context 5 # find and read, one call
+recall "connection pool timeout" --limit 5          # search
+recall show pi:019f... --range 300:340              # read part of a session
+recall "pool timeout" --in pi:019f... --context 5   # search one session and read the hits
 ```
 
-A tool schema is re-sent on every single turn whether or not it is used, and it
-is a second description of flags the CLI already documents — two surfaces to
-keep in step, drifting apart. The skill is read once, when a task calls for it.
+A tool schema goes to the model on each turn, also when the agent does not use
+it. The skill goes to the model only when a task needs it.
 
-Commands: `/recall-health`, `/recall-index`.
-Flags: `--recall-bin`, `--recall-auto-index`.
+## Read a long session
 
-Every search accepts `--repo` (`.` for the current project), `--since` (e.g.
-`7d`), and `--tag` (repeatable; AND). A tag may be a user tag or a reserved
-facet like `source:cursor`.
+Some sessions have thousands of messages. To find a topic in one session,
+search the session:
 
-### Navigating large sessions
-
-Some sessions are huge (thousands of messages). **To find a known topic inside
-one, search it — do not outline it:**
-
-```jsonc
-recall "connection pool timeout" --in pi:019f… --context 5
+```bash
+recall "connection pool timeout" --in pi:019f... --context 5
 ```
 
-That is one call. Measured over real navigations: searching inside a session
-costs ~400 characters against ~4,000 to outline it, and `--context` removes the
-follow-up read entirely. `--in .` scopes to the current
-session — how you recover something said before a compaction.
+This is one command. Measured on real agent work, a search in a session
+returned about 400 characters, and an outline about 4,000. `--in .` searches
+the current session. Use it to find text from before a compaction.
 
-Outline is for a session you know *nothing* about. `recall show` takes three
-flags to slice instead of dumping everything:
+Use the outline only for a session that you know nothing about. These
+`recall show` flags select part of a session:
 
-- `range` — Python-style slice over the message list: `":100"` first 100,
-  `"-50:"` last 50, `"305:315"` window. Negative indices count from the end.
-- `outline` — a table of contents: one line per turn, with runs of tool
-  activity collapsed to `[12-38] tool ×27 (4.2k chars: bash×19, read×8)`. Long
-  sessions degrade to chapter markers (the user's turns) to stay bounded.
-- `role` — comma-separated allowlist: `"user,assistant"` (skip tool noise),
-  `"user"` (just the prompts), `"tool"`. Tool-related labels (`toolResult`,
-  `toolCall`, `function_call`, …) all collapse to `tool`. In long agent loops,
-  ~50% of messages are tool noise; in some, 98% — a 30k-msg session shrinks to
-  ~600 with `role="user"`.
+- `--range FROM:TO` is a Python slice: `:100` is the first 100 messages,
+  `-50:` is the last 50, `305:315` is a window.
+- `--outline` shows one line for each turn. A run of tool calls is one line,
+  for example `[12-38] tool ×27 (4.2k chars: bash×19, read×8)`. A long session
+  shows only the user turns.
+- `--role user,assistant` removes tool output. In long agent sessions, tool
+  messages are often half of all messages or more.
 
-Every rendered message carries its own `## msg N/TOTAL role` header so any
-slice is self-locating. Output is bounded by default and always says how to get
-the rest: sessions over 200 messages return the outline, a read over ~20k chars
-stops with a `Continue with range='X:Y'`, and tool results are clipped at 600
-chars with an elision marker (`tool_chars: 0` to opt out). After a hit at
-`msg_idx=N`, `range: "N-5:N+5"`.
+Each message has a `## N role` header. Output has limits, and it always tells
+you how to get the rest:
 
-### Recommended agent prompt
+- A session with more than 200 messages shows the outline first.
+- A read stops at 20,000 characters and shows the next `--range`.
+- A tool result stops at 600 characters. `--tool-chars 0` shows all of it.
 
-Drop into your project's `AGENTS.md` / `CLAUDE.md`:
+After a hit at message N, read `--range N-5:N+5`, or search with
+`--context 5`.
+
+## Agent instructions
+
+Add this text to the `AGENTS.md` or `CLAUDE.md` file of your project:
 
 ```markdown
 When the user refers to earlier work ("how did we fix…", "continue the…"),
-use the recall tools to find and read the relevant past AI session first.
+use recall to find and read the past AI session first.
 ```
 
-## Staying fresh
+## Index updates
 
-Because the extension is a long-lived process, it keeps the index warm in the
-background so searches always reflect your latest conversations — you never pay
-an index rebuild on the query path:
+`recall index` reads only the new lines of each changed session file. When
+nothing changed, a run takes about 50 ms. The extension runs it at session
+start, and 1.5 s after each agent turn. If two runs start at the same time,
+the second run waits for the first.
 
-- On **session start** it runs an incremental `recall index` to catch up on
-  anything that changed since your last pi session.
-- After **each agent turn** it debounces a background refresh, so the session
-  you're in right now is searchable moments later.
-
-The incremental index is append-only (it reads just the new lines of changed
-session files), so each refresh is typically tens of milliseconds. Disable it
-with `--recall-auto-index=false` or `RECALL_AUTO_INDEX=0` and refresh manually
-via `/recall-index`.
+To stop the background updates, set `--recall-auto-index=false` or
+`RECALL_AUTO_INDEX=0`. Then use `/recall-index` to update the index.
 
 ## Commands
 
-- `/recall-health` — runs `recall doctor` (CLI status + detected sources).
-- `/recall-index` — rebuilds the index (`recall index`; pass `--full` for a full rebuild).
+| Command | Effect |
+|---|---|
+| `/recall-health` | Runs `recall doctor`: the CLI version, the sources and the index size. |
+| `/recall-index` | Runs `recall index`. Add `--full` to index all sessions again. |
 
 ## Configuration
 
-| | |
-| --- | --- |
-| `--recall-bin PATH` flag / `RECALL_BIN` env | Path to the `recall` binary. Default: `recall` on `PATH`. |
-| `--recall-auto-index=false` flag / `RECALL_AUTO_INDEX=0` env | Turn off the background index refresh (on by default). |
+| Setting | Effect |
+|---|---|
+| `--recall-bin PATH` or `RECALL_BIN` | The path to the `recall` binary. |
+| `--recall-auto-index=false` or `RECALL_AUTO_INDEX=0` | Stops the background index updates. They are on by default. |
 
-## License
+## Licence
 
 MIT.

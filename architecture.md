@@ -135,7 +135,7 @@ content (`TestLuaParityClaudeArrayToolResult`).
 - Each file is bounded by a per-file timeout, so a runaway or malicious plugin
   can't hang or DoS indexing — the bad file is skipped and the scan continues
   (`TestLuaRunawayPluginSkipped`).
-- `bench.sh` remains the gate on every change.
+- Measure full-index time before and after a change to a built-in adapter; `autoresearch.md` lists the metrics.
 
 ## Adding a source
 
