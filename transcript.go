@@ -558,7 +558,11 @@ func printHitsWithContext(ctx context.Context, w io.Writer, ix *Index, hits []Hi
 			fmt.Fprintf(w, "## %s  %s  %s\n%s\n",
 				h.StartedTime().Format("2006-01-02 15:04"), h.Source,
 				shortProject(h.Project), h.Title)
-			fmt.Fprintf(w, "id=%s  msg=%d\n\n", h.SessionID, h.MsgIdx)
+			if h.MsgIdx < 0 {
+				fmt.Fprintf(w, "id=%s  (title match)\n\n", h.SessionID)
+			} else {
+				fmt.Fprintf(w, "id=%s  msg=%d\n\n", h.SessionID, h.MsgIdx)
+			}
 		}
 
 		// A title match points at no message. The title states what the session

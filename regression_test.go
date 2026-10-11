@@ -378,7 +378,7 @@ func TestContextExpandsTitleHitsWithoutRepeatingHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, want := range []string{"## 0 user", "zebra migration plan", "## 1 assistant", "## 2 user"} {
+	for _, want := range []string{"(title match)", "## 0 user", "zebra migration plan", "## 1 assistant", "## 2 user"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("title hit context lost %q:\n%s", want, out)
 		}
