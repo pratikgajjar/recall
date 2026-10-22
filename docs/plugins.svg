@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 436" width="960" height="436" role="img" aria-labelledby="t d">
+<title id="t">Index anything: one contract, BM25 search for each source</title>
+<desc id="d">A Lua plugin of kind line, file or kv changes JSONL, Markdown or SQLite bytes into sessions and messages. recall does all I/O and gives every source incremental scans, BM25 search, show, related, tags, facets, stats and JSON output.</desc>
+<style>@media (prefers-reduced-motion: reduce) { .dot { display: none } }</style>
+<rect width="960" height="436" rx="12" fill="#0d1117"/>
+<text x="24" y="38" fill="#e6edf3" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="17" font-weight="600">Index anything: one contract, BM25 search for each source</text>
+<rect x="24" y="64" width="200" height="70" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"></rect>
+<text x="38" y="88" fill="#7ee787" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">JSONL log</text>
+<text x="38" y="108" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12">kind = "line"</text>
+<text x="38" y="125" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">chats, event logs</text>
+<path d="M224,99 C258,99 256,186 290,186" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="5" fill="#7ee787" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M224,99 C258,99 256,186 290,186"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.020;0.160;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.019;0.020;0.160;0.161;1.000"/>
+</circle>
+<rect x="24" y="150" width="200" height="70" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"></rect>
+<text x="38" y="174" fill="#79c0ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">Markdown, text</text>
+<text x="38" y="194" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12">kind = "file"</text>
+<text x="38" y="211" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">notes, memory, skills</text>
+<path d="M224,185 C258,185 256,186 290,186" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="5" fill="#79c0ff" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M224,185 C258,185 256,186 290,186"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.080;0.220;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.079;0.080;0.220;0.221;1.000"/>
+</circle>
+<rect x="24" y="236" width="200" height="70" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"></rect>
+<text x="38" y="260" fill="#d2a8ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">SQLite key/value</text>
+<text x="38" y="280" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12">kind = "kv"</text>
+<text x="38" y="297" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">Cursor-style stores</text>
+<path d="M224,271 C258,271 256,186 290,186" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="5" fill="#d2a8ff" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M224,271 C258,271 256,186 290,186"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.140;0.280;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.139;0.140;0.280;0.281;1.000"/>
+</circle>
+<rect x="290" y="88" width="220" height="196" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.260;0.270;0.420;0.430;1.000"/></rect>
+<text x="304" y="112" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">plugin.lua</text>
+<text x="304" y="134" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" xml:space="preserve">file = function(doc)</text>
+<text x="304" y="152" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" xml:space="preserve">  return session, {</text>
+<text x="304" y="170" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" xml:space="preserve">    { role = "note",</text>
+<text x="304" y="188" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" xml:space="preserve">      text = doc.text } }</text>
+<text x="304" y="206" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" xml:space="preserve">end</text>
+<text x="304" y="240" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">pure transform: no file,</text>
+<text x="304" y="258" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">process or network access</text>
+<path d="M510,186 L540,186" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<rect x="540" y="126" width="190" height="120" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.500;0.510;0.620;0.630;1.000"/></rect>
+<text x="554" y="150" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">one contract</text>
+<text x="554" y="170" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">Session: id, title, time</text>
+<text x="554" y="188" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">Message: role, ts, text</text>
+<text x="554" y="206" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">checkpoint: resume point</text>
+<g class="dot" opacity="0">
+  <rect x="-13" y="-8" width="26" height="16" rx="3" fill="#e3b341"/>
+  <path d="M-8,-3 h16 M-8,2 h11" stroke="#0d1117" stroke-width="1.5"/>
+  <animateMotion dur="8s" repeatCount="indefinite" path="M510,186 L540,186"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.420;0.500;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.419;0.420;0.500;0.501;1.000"/>
+</g>
+<rect x="766" y="64" width="170" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.660;0.670;0.960;0.970;1.000"/></rect>
+<text x="780" y="88" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">incremental scan</text>
+<path d="M730,186 C750,186 746,84 766,84" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="4" fill="#e3b341" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M730,186 C750,186 746,84 766,84"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.600;0.660;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.599;0.600;0.660;0.661;1.000"/>
+</circle>
+<rect x="766" y="114" width="170" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.710;0.720;0.960;0.970;1.000"/></rect>
+<text x="780" y="138" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">BM25 search</text>
+<path d="M730,186 C750,186 746,134 766,134" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="4" fill="#e3b341" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M730,186 C750,186 746,134 766,134"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.600;0.710;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.599;0.600;0.710;0.711;1.000"/>
+</circle>
+<rect x="766" y="164" width="170" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.760;0.770;0.960;0.970;1.000"/></rect>
+<text x="780" y="188" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">show, related</text>
+<path d="M730,186 C750,186 746,184 766,184" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="4" fill="#e3b341" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M730,186 C750,186 746,184 766,184"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.600;0.760;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.599;0.600;0.760;0.761;1.000"/>
+</circle>
+<rect x="766" y="214" width="170" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.810;0.820;0.960;0.970;1.000"/></rect>
+<text x="780" y="238" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">tags, facets</text>
+<path d="M730,186 C750,186 746,234 766,234" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="4" fill="#e3b341" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M730,186 C750,186 746,234 766,234"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.600;0.810;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.599;0.600;0.810;0.811;1.000"/>
+</circle>
+<rect x="766" y="264" width="170" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"><animate attributeName="stroke" dur="8s" repeatCount="indefinite"
+    values="#30363d;#30363d;#e3b341;#e3b341;#30363d;#30363d" keyTimes="0.000;0.860;0.870;0.960;0.970;1.000"/></rect>
+<text x="780" y="288" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" font-weight="700">stats, --json</text>
+<path d="M730,186 C750,186 746,284 766,284" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<circle class="dot" r="4" fill="#e3b341" opacity="0">
+  <animateMotion dur="8s" repeatCount="indefinite" path="M730,186 C750,186 746,284 766,284"
+    calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.600;0.860;1.000"/>
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.599;0.600;0.860;0.861;1.000"/>
+</circle>
+<text x="24" y="342" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">recall does all of the I/O: it walks files, reads only new lines, and stores the checkpoint.</text>
+<text x="24" y="362" fill="#8b949e" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5">The built-in Go adapters for pi, Claude Code, Codex and Cursor make the same contract. recall memory and recall skill are Lua plugins.</text>
+<text x="480" y="412" text-anchor="middle" fill="#e6edf3" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="15" opacity="0">1. recall reads the bytes and keeps the checkpoint
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.000;0.020;0.400;0.420;1.000"/>
+</text>
+<text x="480" y="412" text-anchor="middle" fill="#e6edf3" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="15" opacity="0">2. the plugin changes the bytes into sessions and messages
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.420;0.440;0.600;0.620;1.000"/>
+</text>
+<text x="480" y="412" text-anchor="middle" fill="#e6edf3" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="15" opacity="0">3. every source gets the same BM25 index and the same commands
+  <animate attributeName="opacity" dur="8s" repeatCount="indefinite"
+    values="0;0;1;1;0;0" keyTimes="0.000;0.620;0.640;0.980;1.000;1.000"/>
+</text>
+</svg>

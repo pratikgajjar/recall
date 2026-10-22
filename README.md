@@ -6,6 +6,15 @@ conversation in milliseconds.
 
 ![recall finds and shows past sessions from pi, Claude Code and Codex](packages/pi-recall/assets/demo.png)
 
+## How it works
+
+![recall index reads new lines into a local SQLite FTS5 index; find searches it; show reads the full session from its source](docs/flow.svg)
+
+1. `recall index` reads only the new lines of each session file.
+2. One writer adds them to a local SQLite FTS5 index.
+3. `recall find` ranks the hits with BM25 in about 40 ms.
+4. `recall show` reads the full session again from its source.
+
 recall reads each tool's own files and does not change them. It keeps one
 search index at `~/.recall/index.sqlite`. You can delete the index at any
 time and build it again.
@@ -81,7 +90,7 @@ You can put a flag anywhere on the command line.
 | `--in SESSION-ID` | Search one session. `.` is the current pi session. |
 | `--after WHEN`, `--since WHEN` | Sessions that started after WHEN: `7d`, `YYYY-MM-DD` or epoch milliseconds. |
 | `--before WHEN` | Sessions that started before WHEN. |
-| `--tag TAG` | Sessions with this tag. Repeat the flag to require all tags. `source:pi` selects one source. |
+| `--tag TAG` | Sessions with this tag. Repeat the flag to require all tags. `source:<id>` selects one source, for example `source:pi` or `source:docs`. |
 | `--context N` | Show N messages before and after each hit. |
 | `--limit N` | Show at most N hits. The default is 30. |
 | `--json` | Write JSON. |
@@ -172,7 +181,7 @@ All filters apply. Row limits do not apply.
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite, opened read-only. `workspaceStorage` gives the project folder. |
 | Cursor Agent CLI | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` | No timestamps in the file, so recall uses the file time. |
 
-To index another source, add a Lua plugin. See [Lua plugins](#lua-plugins).
+To index another source, add a Lua plugin. See [Index anything](#index-anything).
 
 ## The index
 
@@ -180,17 +189,17 @@ recall stores the index at `~/.recall/index.sqlite`. Set `RECALL_INDEX` to use
 a different file.
 
 - **Search.** SQLite FTS5 with BM25 ranking. The first 1,500 bytes of a
-  message have full weight. The remainder of the message is indexed in
-  windows with less weight, so text deep in a long message is also found.
+  message have full weight. recall indexes the remainder in windows with less
+  weight. Thus recall also finds text deep in a long message.
 - **Updates.** `recall index` reads only the new lines of each changed
   file. When nothing changed, a run takes about 50 ms. The pi extension runs
   it after each agent turn.
 - **Concurrent runs.** A lock file lets only one `recall index` write at a
   time. A second run waits, then indexes only the remaining changes.
 - **Maintenance.** FTS5 keeps deleted rows until it merges the index. recall
-  counts the deleted rows. When they are more than 10% of the live rows, or
-  after `--full`, recall merges the index and returns the free space to the
-  disk. You do not have to run `VACUUM`.
+  counts the deleted rows. When they are more than 10% of the live rows,
+  recall merges the index and returns the free space to the disk. It also
+  does this after `--full`. You do not have to run `VACUUM`.
 - **Removed sessions.** `recall index --full --prune` removes sessions that
   are no longer in their source.
 
@@ -205,25 +214,109 @@ indexed rows:
 | `recall index --full` | 70 s |
 | Index size | 1.5 GB |
 
-## Lua plugins
+## Index anything
 
-A Lua plugin adds a source without a new build of recall. recall does all of
-the file and database I/O. The plugin only changes bytes into sessions and
-messages. The plugin cannot open files, run commands or use the network.
+![A Lua plugin changes JSONL, Markdown or SQLite bytes into sessions and messages; recall gives every source the same BM25 index and commands](docs/plugins.svg)
+
+recall is not limited to chat history. It indexes any data that you can
+change into a list of text records. All sources use one contract:
+
+| Part | Fields | Purpose |
+|---|---|---|
+| Session | `id`, `title`, `project`, `started_at` | One unit to find and open: a chat, a note, a document |
+| Message | `role`, `ts`, `text` | One searchable record in the session |
+| Checkpoint | opaque string | The point where the next scan continues |
+
+The built-in adapters for pi, Claude Code, Codex and Cursor are Go code that
+makes this contract. A Lua plugin makes the same contract without a new build
+of recall. `recall memory` and `recall skill` are Lua plugins.
+
+Each source that makes the contract gets these functions from recall:
+
+- BM25 search with `recall find`, with the same ranking as the chat sources
+- Incremental scans: recall reads only new lines or changed files
+- `show`, `related`, `tags`, `--repo`, `--json` and `stats`
+- A `source:<id>` facet, for example `--tag source:docs`
+
+### Write a plugin
+
+This plugin makes each Markdown file under `~/code` searchable. Save it as
+`~/.recall/plugins/docs.lua`:
+
+```lua
+return {
+  id = "docs",
+  kind = "file",
+  roots = { "~/code" },
+  glob = "*.md",
+  resume = "file://{id}",
+
+  file = function(doc)
+    local title = doc.text:match("^#%s+([^\n]+)") or doc.basename
+    local session = { id = doc.path, project = doc.dir, title = title, started_at = doc.mtime }
+    return session, { { role = "doc", ts = doc.mtime, text = doc.text } }
+  end,
+}
+```
+
+Then test it, index and search:
+
+```bash
+recall plugin test ~/.recall/plugins/docs.lua ~/code/api/docs/runbook.md
+recall index
+recall "rotate postgres password" --tag source:docs
+```
+
+recall does not go into `.git`, `node_modules` or `vendor` directories.
+
+### Plugin kinds
+
+| Kind | Input | recall calls | Resume |
+|---|---|---|---|
+| `line` | A JSONL file | `line(line, st)` for each line. `st` keeps state for the file. | Byte offset. recall reads only new lines. |
+| `file` | A whole file | `file(doc)` one time for each changed file | File size and time |
+| `kv` | A SQLite key/value table | `session(id, header, related_rows, st)` one time for each session | An integer `watermark` column. Without one, a full scan. |
+
+A plugin can also set `model`, `tokens_in`, `tokens_out`, `cache_read`,
+`cache_write` and `cost_usd`. Then `recall stats` shows real usage for the
+source.
+
+### Helpers
+
+A plugin does not parse JSON or time itself. Go does this work:
+
+| Helper | Result |
+|---|---|
+| `recall.get(bytes, "a.b[0].c")` | One value from JSON, by path |
+| `recall.json(bytes)` | The full JSON value as a Lua table |
+| `recall.lines(s)` | An array of lines |
+| `recall.time(s [, fmt])` | Unix milliseconds. `fmt` is `rfc3339`, `unix_ms`, `unix_s` or a Go layout. |
+| `recall.truncate(s, n)` | `s`, cut to `n` bytes |
+
+### Safety
+
+recall runs each plugin in a Lua VM without the `os`, `io`, `package` and
+network functions. A plugin cannot read files, run commands or connect to a
+network. If a plugin runs for more than 60 s on one file, recall stops it,
+skips that file and continues. If a plugin fails to load, recall skips the plugin and
+indexes the other sources.
+
+### Manage plugins
 
 ```bash
 recall plugin list                 # show bundled and installed plugins
 recall plugin install obsidian     # copy a bundled plugin to ~/.recall/plugins
 recall plugin test my.lua sample   # show the records that a plugin makes from a file
-recall index                       # index the new source
 ```
 
-recall loads each `~/.recall/plugins/*.lua` file when it indexes. If a plugin
-fails, recall skips it and continues. A plugin can be one of three kinds:
-`line` (JSONL), `file` (one document) or `kv` (a SQLite key/value table).
+Bundled plugins: `obsidian`, `memory`, `skill`, and Lua versions of `pi`,
+`claude`, `codex`, `cursor` and `cursor-agent`. A plugin with the same `id` as
+a built-in adapter replaces it. Use this to change a source without a new
+build. Tests check that the Lua versions of `pi`, `claude`, `codex` and
+`cursor` give the same records as the Go adapters.
 
 See [`plugins/`](plugins/) for examples and
-[`architecture.md`](architecture.md) for the plugin contract.
+[`architecture.md`](architecture.md) for the full contract.
 
 ## Design
 
