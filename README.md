@@ -4,7 +4,11 @@ Search your AI chat history from the terminal. recall reads the history of
 pi, Claude Code, Codex, Cursor and Cursor Agent, and finds a past
 conversation in milliseconds.
 
-![recall finds and shows past sessions from pi, Claude Code and Codex](packages/pi-recall/assets/demo.png)
+![A pi agent uses recall to find how a flaky test was fixed in an earlier session, then answers](packages/pi-recall/assets/demo.png)
+
+_Above: a real pi session. The agent searches the project's history with
+`recall find`, reads the matching messages with `--context`, and answers with
+the commit. The history in the image is a synthetic demo._
 
 ## How it works
 
@@ -40,6 +44,12 @@ recall index                 # build the index (about 1 minute for 6,000 session
 recall doctor                # show the sources that recall found
 recall "flaky checkout test" # search
 ```
+
+![recall find shows ranked hits from pi, Claude Code and Codex; --context shows the messages around a hit](docs/cli.png)
+
+One search covers all sources. Each hit shows the source, the project, the
+session id and the matched text. `--context N` also shows the N messages
+around each hit.
 
 ## Use recall with an agent
 
@@ -97,6 +107,19 @@ You can put a flag anywhere on the command line.
 
 Text output ends with `next:` and `prev:` lines. Each line is a complete
 command for the next page of results.
+
+If `--repo` or a time flag removes all hits, recall says so. It also gives
+the newest hit outside the filter and the command without the filter:
+
+```
+$ recall "flaky checkout" --since 7d
+no matches
+// 3 hits are outside the time range. The newest is from 2026-10-24 in ~/code/shop-api. To search them: recall find "flaky checkout" --limit 30
+```
+
+An agent that guesses `--since 30d` for "last month" can then correct the
+guess. Without the hint, the agent can tell you that the work never
+happened.
 
 ### Read a long session
 
@@ -329,6 +352,10 @@ See [`plugins/`](plugins/) for examples and
 
 [`autoresearch.md`](autoresearch.md) records how the search and index
 behaviour was measured, and the experiments that failed.
+
+The images in this README come from [`scripts/demo`](scripts/demo) and a
+synthetic history: `capture-pi.sh` records the pi session, `render.py` makes
+the screenshots, and `diagrams.py` makes the animated diagrams.
 
 ## Licence
 

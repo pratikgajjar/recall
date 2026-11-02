@@ -5,7 +5,10 @@ A [pi](https://github.com/badlogic/pi-mono) extension for
 and read your past AI sessions from pi, Claude Code, Codex and Cursor. You do
 not have to copy and paste transcripts.
 
-![recall finds and shows past sessions from pi, Claude Code and Codex](./assets/demo.png)
+![A pi agent uses recall to find how a flaky test was fixed in an earlier session, then answers](./assets/demo.png)
+
+_A real pi session on a synthetic demo history. The agent runs `recall find`,
+reads the matching messages, and answers with the commit._
 
 ## Install
 
