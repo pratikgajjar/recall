@@ -248,7 +248,7 @@ type commonFlags struct {
 
 func (cf *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&cf.repo, "repo", "", "restrict to a project folder")
-	fs.StringVar(&cf.in, "in", "", "restrict to one session id (search inside a transcript);\n\t\".\" = the newest session for this repo")
+	fs.StringVar(&cf.in, "in", "", "restrict to one session id (search inside a transcript);\n\t\".\" = the current pi session (PI_SESSION_ID)")
 	fs.StringVar(&cf.since, "since", "", "alias for --after (lower time bound)")
 	fs.StringVar(&cf.after, "after", "", "only sessions started after this: 7d, an epoch-ms, or YYYY-MM-DD")
 	fs.StringVar(&cf.before, "before", "", "only sessions started before this (for paging back through history)")
@@ -865,12 +865,51 @@ func runFind(args []string) error {
 	if cf.json {
 		return JSONNewEncoder(os.Stdout).Encode(hits)
 	}
+	if len(hits) == 0 {
+		// --context with no hits used to print nothing at all.
+		fmt.Println("no matches")
+		printOutsideRange(os.Stdout, ix, query, opts, cf)
+		return nil
+	}
 	if *context_ > 0 {
 		return printHitsWithContext(context.Background(), os.Stdout, ix, hits, *context_)
 	}
 	printHits(os.Stdout, hits)
 	printPager(os.Stdout, "find", query, cf, hits)
 	return nil
+}
+
+// outsideRangeLimit caps the search that printOutsideRange runs.
+const outsideRangeLimit = 30
+
+// printOutsideRange explains an empty result that a time bound caused.
+//
+// An agent turns "last month" into --since 30d. When the session is 40 days
+// old, a bare "no matches" reads as "we never did that", and the agent tells
+// the user so. Name what the bound removed and give the command without it.
+func printOutsideRange(w io.Writer, ix *Index, query string, opts SearchOpts, cf commonFlags) {
+	if strings.TrimSpace(query) == "" || (opts.After == 0 && opts.Before == 0) {
+		return
+	}
+	wide := opts
+	wide.After, wide.Before, wide.Limit = 0, 0, outsideRangeLimit
+	hits, err := ix.Search(query, wide)
+	if err != nil || len(hits) == 0 {
+		return
+	}
+	newest := hits[0]
+	for _, h := range hits {
+		if h.StartedAt > newest.StartedAt {
+			newest = h
+		}
+	}
+	count := strconv.Itoa(len(hits))
+	if len(hits) >= outsideRangeLimit {
+		count += "+"
+	}
+	fmt.Fprintf(w, "// %s hits are outside the time range. The newest is from %s."+
+		" To search all dates: %s\n",
+		count, newest.StartedTime().Format("2006-01-02"), pagerBase("find", query, cf))
 }
 
 // printPager emits one-line, copy-pasteable next/prev page commands so an agent
