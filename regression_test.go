@@ -388,41 +388,58 @@ func TestContextExpandsTitleHitsWithoutRepeatingHeader(t *testing.T) {
 	}
 }
 
-// An agent turns "last month" into --since 30d. A bare "no matches" then
-// reads as "we never did that". The output must say that the time bound
-// removed the hits, and give the command without it.
-func TestEmptyResultNamesHitsOutsideTimeRange(t *testing.T) {
+// An agent turns "last month" into --since 30d, or adds --repo . from the
+// wrong directory. A bare "no matches" then reads as "we never did that". The
+// output must say what the filter removed, and give the command without it.
+func TestEmptyResultNamesHitsOutsideFilter(t *testing.T) {
 	ix := newTestIndex(t)
 	old := time.Now().AddDate(0, 0, -45).UnixMilli()
 	if err := ix.IngestBatch(context.Background(), "pi",
-		[]Session{{Source: "pi", SourceID: "s1", Title: "checkout", StartedAt: old, MsgCount: 1}},
+		[]Session{{Source: "pi", SourceID: "s1", Title: "checkout", Project: "/work/shop", StartedAt: old, MsgCount: 1}},
 		[]Message{{SourceID: "s1", Idx: 0, Role: "user", Text: "flaky checkout test"}}); err != nil {
 		t.Fatal(err)
 	}
-	cf := commonFlags{since: "30d"}
-	opts, err := cf.toSearchOpts()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hits, _ := ix.Search("flaky checkout", opts); len(hits) != 0 {
-		t.Fatalf("setup: the time bound should remove the hit, got %d", len(hits))
-	}
-	var b strings.Builder
-	printOutsideRange(&b, ix, "flaky checkout", opts, cf)
-	out := b.String()
 	day := time.UnixMilli(old).Format("2006-01-02")
-	for _, want := range []string{"1 hits are outside the time range", day, `recall find "flaky checkout"`} {
-		if !strings.Contains(out, want) {
-			t.Errorf("hint lost %q:\n%s", want, out)
+	for _, c := range []struct {
+		name string
+		cf   commonFlags
+		want []string
+		gone []string
+	}{
+		{"since", commonFlags{since: "30d"},
+			[]string{"1 hits are outside the time range", day, `recall find "flaky checkout"`}, []string{"--since"}},
+		{"repo", commonFlags{repo: "/work/other", tags: stringSlice{"source:pi"}},
+			[]string{"outside the project /work/other", "in /work/shop", "--tag source:pi"}, []string{"--repo"}},
+		{"both", commonFlags{repo: "/work/other", since: "30d"},
+			[]string{"outside the time range and project /work/other"}, []string{"--repo", "--since"}},
+	} {
+		opts, err := c.cf.toSearchOpts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hits, _ := ix.Search("flaky checkout", opts); len(hits) != 0 {
+			t.Fatalf("%s: setup: the filter should remove the hit, got %d", c.name, len(hits))
+		}
+		var b strings.Builder
+		printOutsideFilter(&b, ix, "flaky checkout", opts, c.cf)
+		out := b.String()
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: hint lost %q:\n%s", c.name, w, out)
+			}
+		}
+		for _, g := range c.gone {
+			if strings.Contains(out, g) {
+				t.Errorf("%s: suggested command keeps %s:\n%s", c.name, g, out)
+			}
 		}
 	}
-	if strings.Contains(out, "--since") {
-		t.Errorf("suggested command keeps the time bound:\n%s", out)
-	}
-	// No time bound, or nothing outside it: no hint.
-	b.Reset()
-	printOutsideRange(&b, ix, "flaky checkout", SearchOpts{}, commonFlags{})
-	printOutsideRange(&b, ix, "zebra", opts, cf)
+	// No filter, or nothing outside it: no hint.
+	var b strings.Builder
+	printOutsideFilter(&b, ix, "flaky checkout", SearchOpts{}, commonFlags{})
+	sinceCF := commonFlags{since: "30d"}
+	opts, _ := sinceCF.toSearchOpts()
+	printOutsideFilter(&b, ix, "zebra", opts, sinceCF)
 	if b.Len() != 0 {
 		t.Errorf("unexpected hint:\n%s", b.String())
 	}

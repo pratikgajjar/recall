@@ -868,7 +868,7 @@ func runFind(args []string) error {
 	if len(hits) == 0 {
 		// --context with no hits used to print nothing at all.
 		fmt.Println("no matches")
-		printOutsideRange(os.Stdout, ix, query, opts, cf)
+		printOutsideFilter(os.Stdout, ix, query, opts, cf)
 		return nil
 	}
 	if *context_ > 0 {
@@ -879,20 +879,35 @@ func runFind(args []string) error {
 	return nil
 }
 
-// outsideRangeLimit caps the search that printOutsideRange runs.
-const outsideRangeLimit = 30
+// outsideFilterLimit caps the search that printOutsideFilter runs.
+const outsideFilterLimit = 30
 
-// printOutsideRange explains an empty result that a time bound caused.
+// printOutsideFilter explains an empty result that a filter caused.
 //
-// An agent turns "last month" into --since 30d. When the session is 40 days
-// old, a bare "no matches" reads as "we never did that", and the agent tells
-// the user so. Name what the bound removed and give the command without it.
-func printOutsideRange(w io.Writer, ix *Index, query string, opts SearchOpts, cf commonFlags) {
-	if strings.TrimSpace(query) == "" || (opts.After == 0 && opts.Before == 0) {
+// An agent turns "last month" into --since 30d, or adds --repo . from a
+// directory the session was not run in. A bare "no matches" then reads as
+// "we never did that", and the agent tells the user so. Say what the filter
+// removed and give the command without it. --in and --tag stay: they name
+// the exact thing that the caller wants.
+func printOutsideFilter(w io.Writer, ix *Index, query string, opts SearchOpts, cf commonFlags) {
+	if strings.TrimSpace(query) == "" {
 		return
 	}
-	wide := opts
-	wide.After, wide.Before, wide.Limit = 0, 0, outsideRangeLimit
+	wide, wideCF := opts, cf
+	var removed []string
+	if opts.After != 0 || opts.Before != 0 {
+		wide.After, wide.Before = 0, 0
+		wideCF.after, wideCF.before, wideCF.since = "", "", ""
+		removed = append(removed, "time range")
+	}
+	if opts.Project != "" {
+		wide.Project, wideCF.repo = "", ""
+		removed = append(removed, "project "+shortProject(opts.Project))
+	}
+	if len(removed) == 0 {
+		return
+	}
+	wide.Limit = outsideFilterLimit
 	hits, err := ix.Search(query, wide)
 	if err != nil || len(hits) == 0 {
 		return
@@ -904,12 +919,13 @@ func printOutsideRange(w io.Writer, ix *Index, query string, opts SearchOpts, cf
 		}
 	}
 	count := strconv.Itoa(len(hits))
-	if len(hits) >= outsideRangeLimit {
+	if len(hits) >= outsideFilterLimit {
 		count += "+"
 	}
-	fmt.Fprintf(w, "// %s hits are outside the time range. The newest is from %s."+
-		" To search all dates: %s\n",
-		count, newest.StartedTime().Format("2006-01-02"), pagerBase("find", query, cf))
+	fmt.Fprintf(w, "// %s hits are outside the %s. The newest is from %s in %s."+
+		" To search them: %s\n",
+		count, strings.Join(removed, " and "), newest.StartedTime().Format("2006-01-02"),
+		shortProject(newest.Project), pagerBase("find", query, wideCF))
 }
 
 // printPager emits one-line, copy-pasteable next/prev page commands so an agent
