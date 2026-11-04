@@ -184,3 +184,76 @@ func TestCompactConvertsLegacyAutoVacuum(t *testing.T) {
 		t.Errorf("freelist = %d after VACUUM", free)
 	}
 }
+
+// ingestUncounted re-ingests like a writer that does not count its deletes
+// (an older recall): the deletes happen, the counter does not move.
+func ingestUncounted(t *testing.T, ix *Index, n int, tag string) {
+	t.Helper()
+	before := ix.GetMeta(metaStaleRows)
+	seedMany(t, ix, n, tag)
+	if err := ix.SetMeta(metaStaleRows, before); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Deletes by another writer never reach the counter. A real index grew from
+// 1.5 GB to 3.2 GB under an older binary and nothing compacted it.
+func TestForeignDeletesAreFound(t *testing.T) {
+	ix := newTestIndex(t)
+	seedMany(t, ix, 20, "a")
+	if err := ix.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.RecordSeen(); err != nil {
+		t.Fatal(err)
+	}
+	live := pragmaInt(t, ix, `SELECT COUNT(*) FROM messages_fts`)
+
+	// No other writer: no change, and no count of every row.
+	if foreign, err := ix.ReconcileForeignWrites(); err != nil || foreign {
+		t.Fatalf("no other writer, got foreign=%v err=%v", foreign, err)
+	}
+
+	ingestUncounted(t, ix, 20, "b") // replaces every row
+	if got := staleRows(t, ix); got != 0 {
+		t.Fatalf("setup: counter moved to %d", got)
+	}
+	foreign, err := ix.ReconcileForeignWrites()
+	if err != nil || !foreign {
+		t.Fatalf("other writer not seen: foreign=%v err=%v", foreign, err)
+	}
+	if got := staleRows(t, ix); got != live {
+		t.Fatalf("stale = %d after reconcile, want %d", got, live)
+	}
+	if need, _ := ix.NeedsCompaction(); !need {
+		t.Fatal("foreign deletes did not trigger compaction")
+	}
+
+	// After Compact, the old gaps are the new base: no debt remains.
+	if err := ix.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	ix.db.Exec(`DELETE FROM meta WHERE k = ?`, metaSeenMaxRowid) // force the full check
+	if _, err := ix.ReconcileForeignWrites(); err != nil {
+		t.Fatal(err)
+	}
+	if got := staleRows(t, ix); got != 0 {
+		t.Fatalf("stale = %d after compact + reconcile, want 0", got)
+	}
+}
+
+// The counter already holds this build's own deletes. Reconcile must not add
+// them a second time.
+func TestReconcileDoesNotDoubleCount(t *testing.T) {
+	ix := newTestIndex(t)
+	seedMany(t, ix, 20, "a")
+	live := pragmaInt(t, ix, `SELECT COUNT(*) FROM messages_fts`)
+	seedMany(t, ix, 20, "b") // counted
+	ix.db.Exec(`DELETE FROM meta WHERE k = ?`, metaSeenMaxRowid)
+	if _, err := ix.ReconcileForeignWrites(); err != nil {
+		t.Fatal(err)
+	}
+	if got := staleRows(t, ix); got != live {
+		t.Fatalf("stale = %d, want %d", got, live)
+	}
+}

@@ -599,6 +599,11 @@ func runIndex(args []string) error {
 	}
 	defer ix.Close()
 
+	// Another writer (an older recall, for example) may have deleted rows
+	// that the stale-row counter never saw. Add them before this run writes.
+	if _, err := ix.ReconcileForeignWrites(); err != nil {
+		fmt.Fprintf(os.Stderr, "  stale-row check failed: %v\n", err)
+	}
 	ix.BulkMode(true, *full)
 
 	start := time.Now()
@@ -705,6 +710,9 @@ func runIndex(args []string) error {
 		} else {
 			fmt.Printf("\r\033[K  compacted index in %s\n", time.Since(t0).Round(time.Millisecond))
 		}
+	}
+	if err := ix.RecordSeen(); err != nil {
+		fmt.Fprintf(os.Stderr, "  record index state: %v\n", err)
 	}
 	_ = ix.SetMeta("indexed_at", time.Now().Format(time.RFC3339))
 	fmt.Printf("indexed %d sessions in %s → %s\n",

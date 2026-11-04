@@ -222,7 +222,9 @@ a different file.
 - **Maintenance.** FTS5 keeps deleted rows until it merges the index. recall
   counts the deleted rows. When they are more than 10% of the live rows,
   recall merges the index and returns the free space to the disk. It also
-  does this after `--full`. You do not have to run `VACUUM`.
+  does this after `--full`. If another program, such as an older recall,
+  wrote to the index, recall finds its deletes too. You do not have to run
+  `VACUUM`.
 - **Removed sessions.** `recall index --full --prune` removes sessions that
   are no longer in their source.
 

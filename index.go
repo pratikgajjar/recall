@@ -205,10 +205,13 @@ func bootstrap(db *sql.DB) error {
 		}
 	}
 	if !hadSchema {
-		// A new index has no stale rows. An existing index without this key has
-		// an unknown history, so NeedsCompaction compacts it once.
-		if _, err := db.Exec(`INSERT OR IGNORE INTO meta(k,v) VALUES(?, '0')`, metaStaleRows); err != nil {
-			return err
+		// A new index has no stale rows and no other writer yet. An existing
+		// index without these keys has an unknown history, so it is checked
+		// once (see ReconcileForeignWrites and NeedsCompaction).
+		for _, k := range []string{metaStaleRows, metaSeenMaxRowid, metaChurnBase} {
+			if _, err := db.Exec(`INSERT OR IGNORE INTO meta(k,v) VALUES(?, '0')`, k); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -882,6 +885,74 @@ const ftsAutomerge = 4
 // metaStaleRows counts FTS rows deleted since the last Compact.
 const metaStaleRows = "fts_stale_rows"
 
+// metaSeenMaxRowid is the highest messages_fts rowid at the end of the last
+// run of this build. metaChurnBase is ftsChurn at the last Compact.
+const (
+	metaSeenMaxRowid = "fts_seen_max_rowid"
+	metaChurnBase    = "fts_churn_base"
+)
+
+// ftsMaxRowid returns the highest messages_fts rowid. FTS5 gives each new row
+// a rowid above the current highest, so any insert, by any writer, raises it.
+// It is a seek on the docsize primary key: about 10 µs.
+func (ix *Index) ftsMaxRowid() (int64, error) {
+	var n int64
+	err := ix.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM messages_fts_docsize`).Scan(&n)
+	return n, err
+}
+
+// ftsChurn returns how many rowids were used and then deleted. Rowids start
+// at 1 and each new row goes above the highest, so every rowid up to the
+// highest was used once: the ones that are not live were deleted. (Deleting
+// the highest rows lets their rowids be used again; those deletes are missed.)
+// It counts all live rows: about 60 ms on 1.2 million rows, so it runs only
+// when needed.
+func (ix *Index) ftsChurn() (int64, error) {
+	var n int64
+	err := ix.db.QueryRow(`SELECT COALESCE(MAX(id), 0) - COUNT(*) FROM messages_fts_docsize`).Scan(&n)
+	return n, err
+}
+
+// ReconcileForeignWrites adds deletes made by other writers to the stale-row
+// debt, and reports whether there were any.
+//
+// Only this build counts its deletes. An older recall, or another tool, that
+// writes the same index deletes rows that the counter never sees: a real
+// index grew from 1.5 GB to 3.2 GB in three weeks under an older binary, with
+// 10.8 million uncounted deletes, and nothing compacted it. Call this before
+// the run's own writes. If the highest rowid moved since this build's last
+// run, another writer was here; then the deletes since the last Compact give
+// the true debt.
+func (ix *Index) ReconcileForeignWrites() (bool, error) {
+	cur, err := ix.ftsMaxRowid()
+	if err != nil {
+		return false, err
+	}
+	if seen := ix.GetMeta(metaSeenMaxRowid); seen != "" && seen == strconv.FormatInt(cur, 10) {
+		return false, nil
+	}
+	churn, err := ix.ftsChurn()
+	if err != nil {
+		return false, err
+	}
+	base, _ := strconv.ParseInt(ix.GetMeta(metaChurnBase), 10, 64)
+	debt := churn - base
+	if counted, err := strconv.ParseInt(ix.GetMeta(metaStaleRows), 10, 64); err == nil && counted >= debt {
+		return true, nil
+	}
+	return true, ix.SetMeta(metaStaleRows, strconv.FormatInt(debt, 10))
+}
+
+// RecordSeen stores the highest rowid at the end of a run, so the next run
+// can tell whether another writer was here.
+func (ix *Index) RecordSeen() error {
+	cur, err := ix.ftsMaxRowid()
+	if err != nil {
+		return err
+	}
+	return ix.SetMeta(metaSeenMaxRowid, strconv.FormatInt(cur, 10))
+}
+
 // Compact when stale rows exceed 1/compactStaleDivisor of live rows. Below
 // that, a merge costs more than the space it recovers.
 const compactStaleDivisor = 10
@@ -926,10 +997,19 @@ func (ix *Index) Compact() error {
 	if err := ix.SetMeta(metaStaleRows, "0"); err != nil {
 		return err
 	}
+	// Optimize removes deleted rows but does not renumber the live ones.
+	// Record the delete count now, so a later debt counts only new deletes.
+	churn, err := ix.ftsChurn()
+	if err != nil {
+		return err
+	}
+	if err := ix.SetMeta(metaChurnBase, strconv.FormatInt(churn, 10)); err != nil {
+		return err
+	}
 	if err := ix.reclaim(); err != nil {
 		return fmt.Errorf("reclaim free pages: %w", err)
 	}
-	_, err := ix.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	_, err = ix.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	return err
 }
 
