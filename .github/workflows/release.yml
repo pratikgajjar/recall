@@ -28,7 +28,10 @@ jobs:
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
-          version: "~> v2"
+          # Pinned: GoReleaser 2.20.0 writes `zap :not_required` into the cask,
+          # and Homebrew 6.0.12 refuses to load it (v0.9.0 broke `brew upgrade`).
+          # Unpin when Homebrew accepts that stanza.
+          version: "v2.19.0"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
