@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/bytedance/sonic v1.15.5
-	github.com/goccy/go-json v0.10.6
+	github.com/goccy/go-json v0.12.0
 	github.com/yuin/gopher-lua v1.1.2
 	modernc.org/sqlite v1.61.0
 )
