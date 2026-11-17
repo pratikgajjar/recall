@@ -6,7 +6,7 @@ require (
 	github.com/bytedance/sonic v1.15.5
 	github.com/goccy/go-json v0.12.0
 	github.com/yuin/gopher-lua v1.1.2
-	modernc.org/sqlite v1.61.1
+	modernc.org/sqlite v1.62.0
 )
 
 require (
