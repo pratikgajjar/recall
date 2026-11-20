@@ -9,15 +9,48 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
+
+// codexLogName recognises a rollout log and whether it is zstd-compressed.
+// Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, and with
+// local_thread_store_compression = true it rewrites them to rollout-*.jsonl.zst
+// in place — the whole history, not just new sessions. An adapter that only
+// matched ".jsonl" would therefore see 13 sessions on a machine that has 16,388,
+// and `--prune` would then delete the 16,375 it could not read.
+func codexLogName(name string) (compressed, ok bool) {
+	if !strings.HasPrefix(name, "rollout-") {
+		return false, false
+	}
+	switch {
+	case strings.HasSuffix(name, ".jsonl.zst"):
+		return true, true
+	case strings.HasSuffix(name, ".jsonl"):
+		return false, true
+	}
+	return false, false
+}
 
 type CodexAdapter struct {
 	Root string
+	// SourceID names this root in the index. Codex keeps live sessions under
+	// ~/.codex/sessions and pruned ones under ~/.codex/archived_sessions; both
+	// use the same rollout format, so one parser serves both under two source
+	// ids. Empty means "codex".
+	SourceID string
 	// batchSessions caps sessions per ingest batch (0 = default). Test-only.
 	batchSessions int
 }
 
-func (a *CodexAdapter) ID() string      { return "codex" }
+func (a *CodexAdapter) source() string {
+	if a.SourceID != "" {
+		return a.SourceID
+	}
+	return "codex"
+}
+
+func (a *CodexAdapter) ID() string      { return a.source() }
 func (a *CodexAdapter) Available() bool { _, err := os.Stat(a.Root); return err == nil }
 
 func (a *CodexAdapter) Scan(ctx context.Context, prev string) ([]Session, []Message, string, error) {
@@ -36,8 +69,8 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
+		compressed, isLog := codexLogName(d.Name())
+		if !isLog {
 			return nil
 		}
 		st, statErr := d.Info()
@@ -51,13 +84,18 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 			nextMap[path] = prevSt
 			return nil
 		}
-		if ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
+		// A compressed log cannot be resumed at a byte offset: the offset is in
+		// the decompressed stream, not in the file. Changed .zst files are
+		// reparsed in full; the size+mtime check above still skips them when
+		// they have not changed.
+		if !compressed && ok && prevSt.SID != "" && size > prevSt.Size && prevSt.Offset <= size {
 			if p, e := a.parse(ctx, path, prevSt.Offset, prevSt.Idx, prevSt.SID, true); e == nil {
 				nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: prevSt.SID}
 				if len(p.msgs) == 0 {
 					return nil // grew by non-message lines; nothing new to index
 				}
 				s := p.session(prevSt.SID)
+				s.Source = a.source()
 				s.Append = true
 				s.StartedAt, s.Project, s.Title = 0, "", ""
 				return be.add(s, p.msgs)
@@ -70,8 +108,14 @@ func (a *CodexAdapter) ScanStream(ctx context.Context, prev string, emit EmitFun
 			nextMap[path] = fileState{Size: size, MTime: mtime}
 			return nil
 		}
-		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: p.endOffset, Idx: p.nextIdx, SID: p.sessID}
-		return be.add(p.session(p.sessID), p.msgs)
+		endOffset := p.endOffset
+		if compressed {
+			endOffset = 0 // see above: a stream offset is not a file offset
+		}
+		nextMap[path] = fileState{Size: size, MTime: mtime, Offset: endOffset, Idx: p.nextIdx, SID: p.sessID}
+		sess := p.session(p.sessID)
+		sess.Source = a.source()
+		return be.add(sess, p.msgs)
 	})
 	if err != nil {
 		return err
@@ -86,7 +130,7 @@ func (a *CodexAdapter) Fetch(ctx context.Context, sourceID string) ([]Message, e
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(d.Name(), suffix) {
+		if strings.HasSuffix(d.Name(), suffix) || strings.HasSuffix(d.Name(), suffix+".zst") {
 			found = path
 			return io.EOF
 		}
@@ -115,7 +159,7 @@ type codexParse struct {
 
 func (p codexParse) session(sourceID string) Session {
 	s := p.usage
-	s.Source, s.SourceID = "codex", sourceID
+	s.Source, s.SourceID = "", sourceID
 	s.Project, s.Title = p.project, titleFromPrompt(p.firstUser)
 	s.StartedAt, s.EndedAt = p.startedAt, p.endedAt
 	s.MsgCount = len(p.msgs)
@@ -129,14 +173,23 @@ func (a *CodexAdapter) parse(ctx context.Context, path string, startOffset int64
 		return res, err
 	}
 	defer fh.Close()
-	if startOffset > 0 {
+
+	var src io.Reader = fh
+	if strings.HasSuffix(path, ".zst") {
+		zr, zerr := zstd.NewReader(fh)
+		if zerr != nil {
+			return res, zerr
+		}
+		defer zr.Close()
+		src = zr
+	} else if startOffset > 0 {
 		if _, err := fh.Seek(startOffset, io.SeekStart); err != nil {
 			return res, err
 		}
 	}
 	idx := startIdx
 	callNames := map[string]string{} // call_id -> tool name, for attributing outputs
-	consumed, err := scanLines(ctx, fh, func(line []byte) error {
+	consumed, err := scanLines(ctx, src, func(line []byte) error {
 		var ev CodexEvent
 		if JSONUnmarshal(line, &ev) != nil {
 			return nil
