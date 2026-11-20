@@ -194,6 +194,9 @@ func defaultAdapters() []Adapter {
 		&CursorAdapter{UserDir: filepath.Join(home, "Library", "Application Support", "Cursor", "User")},
 		&ClaudeAdapter{Root: filepath.Join(home, ".claude", "projects")},
 		&CodexAdapter{Root: filepath.Join(home, ".codex", "sessions")},
+		// Codex prunes old rollouts into a second tree; same format, own source id
+		// so `codex prune` never looks like "sessions disappeared".
+		&CodexAdapter{Root: filepath.Join(home, ".codex", "archived_sessions"), SourceID: "codex-archived"},
 		&PiAdapter{Root: filepath.Join(home, ".pi", "agent", "sessions")},
 		&CursorAgentAdapter{Root: filepath.Join(home, ".cursor", "projects")},
 	}

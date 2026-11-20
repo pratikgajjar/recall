@@ -33,24 +33,6 @@ curl -fsSL https://raw.githubusercontent.com/pratikgajjar/recall/main/install.sh
 go install github.com/pratikgajjar/recall@latest
 ```
 
-Prebuilt binaries for macOS and Linux are on the
-[releases page](https://github.com/pratikgajjar/recall/releases). recall is
-one static Go binary. It does not need CGO.
-
-## Quick start
-
-```bash
-recall index                 # build the index (about 1 minute for 6,000 sessions)
-recall doctor                # show the sources that recall found
-recall "flaky checkout test" # search
-```
-
-![recall find shows ranked hits from pi, Claude Code and Codex; --context shows the messages around a hit](docs/cli.png)
-
-One search covers all sources. Each hit shows the source, the project, the
-session id and the matched text. `--context N` also shows the N messages
-around each hit.
-
 ## Use recall with an agent
 
 An agent uses the same CLI that you use. recall has no server and no tool
@@ -339,6 +321,63 @@ Bundled plugins: `obsidian`, `memory`, `skill`, and Lua versions of `pi`,
 a built-in adapter replaces it. Use this to change a source without a new
 build. Tests check that the Lua versions of `pi`, `claude`, `codex` and
 `cursor` give the same records as the Go adapters.
+
+The first five mirror the built-in adapters — installing one shadows the Go
+adapter by source id, and `lua_test.go` asserts the two agree. The rest cover
+tools recall has no Go adapter for. `agy`, `cursor-acp`, `devin`, `dsh`, `mimo`
+and `opencode` are marked *exported first*: the agent skill writes those to
+plaintext JSONL under `~/.recall/<source>/` because the Lua sandbox cannot open
+SQLite, protobuf or multi-frame zstd.
+
+| Plugin | Reads | Storage |
+|---|---|---|
+| `claude` | Claude Code (`claude --resume`) | `~/.claude/projects/<cwd>/*.jsonl` |
+| `codex` | Codex CLI (`codex resume`) | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]` |
+| `cursor` | Cursor composer blobs | `state.vscdb` (`composerData:*`, `bubbleId:*`) |
+| `cursor-agent` | Cursor Agent CLI transcripts | `~/.cursor/projects/<slug>/agent-transcripts/<id>/*.jsonl` |
+| `pi` | pi (resumes by id) | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
+| `droid` | Factory Droid (`droid resume`) | `~/.factory/sessions/<cwd>/*.jsonl` |
+| `grok` | Grok Build (`grok --resume`) | `~/.grok/sessions/<cwd>/<id>/chat_history.jsonl` |
+| `kimi` | Kimi Code (`kimi -S`) | `~/.kimi-code/sessions/<ws>/session_<id>/agents/*/wire.jsonl` |
+| `omp` | Oh My Pi (`omp --resume`) | `~/.omp/agent/sessions/<cwd>/*.jsonl` |
+| `memory` | pi persistent memory | `~/.pi/agent/memory/*.md` |
+| `skill` | mirrored skill catalog | `~/.cache/pi-skill-search/catalog` |
+| `obsidian` | an Obsidian vault or notes folder | `~/Documents/Obsidian`, `~/obsidian`, `~/notes` |
+| `agy` | Antigravity CLI + IDE (exported first) | `~/.recall/agy/<id>.jsonl` ← Antigravity sqlite and `.pb` |
+| `cursor-acp` | Cursor ACP sessions (exported first) | `~/.recall/cursor-acp/<id>.jsonl` ← `~/.cursor/acp-sessions/<id>/store.db` |
+| `devin` | Devin (exported first) | `~/.recall/devin/<id>.jsonl` |
+| `dsh` | DeepSeek Harness (exported first) | `~/.recall/dsh/<id>.jsonl` ← multi-frame zstd under `~/.dsh/sessions` |
+| `mimo` | mimocode (exported first) | `~/.recall/mimo/<id>.jsonl` ← `~/.local/share/mimocode/mimocode.db` |
+| `opencode` | OpenCode (exported first) | `~/.recall/opencode/<id>.jsonl` |
+
+`agy`, `cursor-acp`, `devin`, `dsh`, `mimo`, and `opencode` store sessions in a
+shape the Lua sandbox cannot read (SQLite, protobuf, multi-frame zstd, packed
+blobs). Their agent skill exports those logs to plaintext JSONL first; the
+plugin only maps events. Everything else is read straight from the source.
+
+### Bundled plugins
+
+| Plugin | Reads | Storage |
+|---|---|---|
+| `claude` | Claude Code | `~/.claude/projects/<cwd>/*.jsonl` |
+| `codex` | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]` |
+| `droid` | Factory Droid | `~/.factory/sessions/<cwd>/*.jsonl` |
+| `grok` | Grok Build | `~/.grok/sessions/<cwd>/<id>/chat_history.jsonl` |
+| `kimi` | Kimi Code | `~/.kimi-code/sessions/<ws>/session_<id>/agents/*/wire.jsonl` |
+| `omp` | Oh My Pi | `~/.omp/agent/sessions/<cwd>/*.jsonl` |
+| `agy` | Antigravity CLI + IDE | `~/.recall/agy/<id>.jsonl` |
+| `cursor-acp` | Cursor ACP sessions | `~/.recall/cursor-acp/<id>.jsonl` |
+| `devin` | Devin | `~/.recall/devin/<id>.jsonl` |
+| `dsh` | DeepSeek Harness | `~/.recall/dsh/<id>.jsonl` |
+| `mimo` | mimocode | `~/.recall/mimo/<id>.jsonl` |
+| `opencode` | OpenCode | `~/.recall/opencode/<id>.jsonl` |
+| `memory` | pi persistent memory | `~/.pi/agent/memory/*.md` |
+| `skill` | mirrored skill catalog | `~/.cache/pi-skill-search/catalog` |
+| `obsidian` | an Obsidian vault or notes folder | `~/Documents/Obsidian`, `~/obsidian`, `~/notes` |
+
+Also note `claude`, `codex`, `cursor`, `cursor-agent`, and `pi` mirror the
+built-in adapters: installing one shadows the Go adapter by source id, and
+`lua_test.go` asserts the two agree.
 
 See [`plugins/`](plugins/) for examples and
 [`architecture.md`](architecture.md) for the full contract.
